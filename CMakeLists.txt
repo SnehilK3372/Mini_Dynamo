@@ -10,7 +10,7 @@ set(SOURCES
     src/net/tcp_server.cpp
     src/net/tcp_client.cpp
     src/message.cpp
-    src/hash.cpp
+    src/storage/in_memory_storage.cpp
 )
 
 include_directories(src)

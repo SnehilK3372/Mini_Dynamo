@@ -22,17 +22,18 @@ Do **not** narrate the code as you build it. Save teaching for a separate review
 
 **Goal:** Clean the repository so the rest of the work has a professional base.
 
-- [ ] Add `.gitignore` covering `build/`, `CMakeFiles/`, `Makefile` (root, generated), `cmake_install.cmake`, `CMakeCache.txt`, `*.o`, `*.out`, and the `kvstore` binary.
-- [ ] Purge the committed build artifacts from git history (not just working tree). Confirm `git log -- build/` returns nothing after.
-- [ ] Rename the top-level directory `Project: Mini-Dynamo` → `mini-dynamo` (colon is illegal on Windows, space breaks scripts). Update any references.
-- [ ] Delete dead code, in this order:
-  - [ ] `Node::start()` and `Node::server_loop()` in `node.cpp` / `node.h`, plus their `SEED_HOST`/`SEED_PORT` reads
-  - [ ] The unused second store (`store` / `store_mtx`) in `node.h`
-  - [ ] The unused FNV `hashKey` in `hash.cpp` / `hash.h`
-  - [ ] `config/node_config.json`
-  - [ ] `<nlohmann/json.hpp>` include in `node.h` and the JSON library install line in the Dockerfile
-- [ ] Introduce a `StorageEngine` abstract interface with `put(key, value)`, `get(key)`, and iterator/scan (design for future versioned values and RocksDB). Make the existing in-memory map an implementation of it. This is the seam Tier 1A will use.
-- [ ] Write a real `README.md` describing what the system actually does *today* (not the aspirational features). Include: what it is, one-paragraph architecture, `docker-compose up` instructions, wire protocol summary. Link to `docs/architecture.md` for the design.
+- [x] Add `.gitignore` covering `build/`, `CMakeFiles/`, `Makefile` (root, generated), `cmake_install.cmake`, `CMakeCache.txt`, `*.o`, `*.out`, and the `kvstore` binary.
+- [x] Purge the committed build artifacts from git history (not just working tree). Confirm `git log -- build/` returns nothing after. *(No `.git/` existed — fresh `git init` with artifacts deleted before the first commit; history is clean by construction.)*
+- [ ] Rename the top-level directory `Project: Mini-Dynamo` → `mini-dynamo` (colon is illegal on Windows, space breaks scripts). Update any references. *(Deferred — user will rename manually; it's the live session's working directory.)*
+- [x] Delete dead code, in this order:
+  - [x] `Node::start()` and `Node::server_loop()` in `node.cpp` / `node.h`, plus their `SEED_HOST`/`SEED_PORT` reads
+  - [x] The unused second store (`store` / `store_mtx`) in `node.h`
+  - [x] The unused FNV `hashKey` in `hash.cpp` / `hash.h`
+  - [x] `config/node_config.json`
+  - [x] `<nlohmann/json.hpp>` include in `node.h` and the JSON library install line in the Dockerfile
+  - [x] *(Flagged additions, zero call sites: `Node::sendMessage`, `tcp_send_recv`, `read_length_prefixed`, `split_lines` in `node.cpp`; `split()` in `message.cpp`; unused `jsoncpp` Dockerfile packages.)*
+- [x] Introduce a `StorageEngine` abstract interface with `put(key, value)`, `get(key)`, and iterator/scan (design for future versioned values and RocksDB). Make the existing in-memory map an implementation of it. This is the seam Tier 1A will use.
+- [x] Write a real `README.md` describing what the system actually does *today* (not the aspirational features). Include: what it is, one-paragraph architecture, `docker-compose up` instructions, wire protocol summary. Link to `docs/architecture.md` for the design.
 
 **Definition of done:** clean `git status`, no build artifacts committed, cluster still comes up via `docker-compose up --build`, README accurately describes the current system, storage interface in place with the in-memory implementation passing existing manual tests.
 

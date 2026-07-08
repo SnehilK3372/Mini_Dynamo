@@ -13,19 +13,6 @@ std::string Message::serialize() const {
     return oss.str();
 }
 
-static std::vector<std::string> split(const std::string &s, char delim) {
-    std::vector<std::string> parts;
-    std::string temp;
-    for (char c : s) {
-        if (c == delim) {
-            parts.push_back(temp);
-            temp.clear();
-        } else temp.push_back(c);
-    }
-    parts.push_back(temp);
-    return parts;
-}
-
 Message Message::deserialize(const std::string& data) {
         Message msg;
         // (Simplified split logic for brevity)

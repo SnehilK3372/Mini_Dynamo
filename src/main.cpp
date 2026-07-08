@@ -2,6 +2,7 @@
 #include "router.h"
 #include <iostream>
 #include <cstdlib>
+#include <memory>
 #include <thread>
 #include <chrono>
 #include <sstream>
@@ -9,6 +10,7 @@
 #include "net/tcp_server.h"
 #include "net/tcp_client.h"
 #include "message.h"
+#include "storage/in_memory_storage.h"
 
 using namespace std;
 
@@ -64,7 +66,8 @@ int main(){
 
     Router router;
     NodeInfo myInfo(node_id, node_id, port);
-    Node node(myInfo, &router);
+    // In-memory engine for now; Tier 1A swaps in RocksDB behind StorageEngine.
+    Node node(myInfo, &router, make_unique<InMemoryStorageEngine>());
 
     router.addPhysicalNode(myInfo);//prevents race condtion
 
