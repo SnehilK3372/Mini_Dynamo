@@ -1,0 +1,19 @@
+
+# Test1
+printf "PUT|k1|v1|cli" | nc node1 5001
+
+# Test2
+printf "PUT|k2|random_val|cli" | nc node2 5002
+
+# Test3
+printf "GET|k2|cli" | nc node2 5002
+
+# Test4
+printf "GET|k2|cli" | nc node1 5001
+
+# Test5
+docker stop node2
+printf "GET|k2|cli" | nc node3 5003
+
+#Test6
+docker start node2

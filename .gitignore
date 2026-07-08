@@ -1,0 +1,16 @@
+# CMake-generated build system (regenerate with `cmake .`; CMakeLists.txt is source of truth)
+build/
+CMakeFiles/
+/Makefile
+cmake_install.cmake
+CMakeCache.txt
+compile_commands.json
+
+# Compiled objects and binaries
+*.o
+*.out
+*.bin
+kvstore
+
+# Editor / tooling scratch
+.claude/
