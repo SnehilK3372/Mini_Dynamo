@@ -47,6 +47,51 @@ services:
       - node1
     restart: unless-stopped
 
+  # PostgreSQL for the gateway's metadata (node registry, config versions, audit log).
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_DB: minidynamo
+      POSTGRES_USER: minidynamo
+      POSTGRES_PASSWORD: minidynamo
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - dhtnet
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U minidynamo -d minidynamo"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # Spring Boot gateway: REST + JWT in front of the cluster, metadata in Postgres.
+  gateway:
+    build: ./gateway
+    container_name: gateway
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/minidynamo
+      DB_USERNAME: minidynamo
+      DB_PASSWORD: minidynamo
+      CLUSTER_NODES: node1:5001,node2:5002,node3:5003
+      JWT_SECRET: ${JWT_SECRET:-dev-only-insecure-secret-change-me-please-0123456789}
+      AUTH_USERNAME: ${AUTH_USERNAME:-admin}
+      AUTH_PASSWORD: ${AUTH_PASSWORD:-changeme}
+    ports:
+      - "8080:8080"
+    networks:
+      - dhtnet
+    depends_on:
+      postgres:
+        condition: service_healthy
+      node1:
+        condition: service_started
+    restart: unless-stopped
+
 networks:
   dhtnet:
     driver: bridge
+
+volumes:
+  pgdata:

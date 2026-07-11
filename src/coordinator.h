@@ -63,9 +63,15 @@ public:
     PutResult coordinatePut(const std::string &key, const std::string &value,
                             const VectorClock &context, int N, int W);
 
+    // Delete path. Writes a versioned *tombstone* by the same W-quorum as a put,
+    // so the delete propagates and converges instead of being a local erase that
+    // a stale replica could resurrect. Returns the tombstone's clock on success.
+    PutResult coordinateDelete(const std::string &key, const VectorClock &context, int N, int W);
+
     // Read path. Gathers R responses, reconciles by vector clock, and returns the
     // dominant version (repairing stale replicas asynchronously) or the full
-    // sibling set when versions are concurrent.
+    // sibling set when versions are concurrent. A dominant *tombstone* reads back
+    // as NOTFOUND (but still repairs stale replicas so the delete converges).
     GetResult coordinateGet(const std::string &key, int N, int R);
 
     const QuorumConfig &defaults() const { return defaults_; }
@@ -75,6 +81,15 @@ private:
     // blind write is bumped above what we already hold and can never be born
     // already-dominated.
     VectorClock localClock(const std::string &key) const;
+
+    // Builds the clock a new write/delete should carry: the client's context with
+    // our own entry bumped above max(context, local). Shared by put and delete.
+    VectorClock bumpedClock(const std::string &key, const VectorClock &context) const;
+
+    // The shared W-quorum write fan-out used by both put and delete: fans the
+    // already-built VersionedValue out to the N owners and returns OK once W
+    // acknowledge within the deadline, else quorum_not_met.
+    PutResult writeQuorum(const std::string &key, const VersionedValue &vv, int N, int W);
 
     // Fire-and-forget: push `value` to `peer` (or to local storage if peer is
     // self) on a background thread, bumping the read-repair metric. Never blocks

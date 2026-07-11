@@ -249,6 +249,69 @@ TEST(Coordinator, ReadRepairPushesDominantToStaleReplica) {
     EXPECT_EQ(f.metrics.readRepairCount(), 1u);
 }
 
+// ---- Delete (tombstones) ------------------------------------------------
+
+TEST(Coordinator, DeleteThenGetReturnsNotFound) {
+    Fixture f;
+    auto c = f.make();
+    ASSERT_TRUE(c.coordinatePut("k", "v", VectorClock{}, 3, 2).ok);
+
+    PutResult d = c.coordinateDelete("k", VectorClock{}, 3, 2);
+    ASSERT_TRUE(d.ok);
+    // The tombstone must strictly dominate the value it removed.
+    EXPECT_EQ(d.clock.get("node1"), 2u);
+
+    GetResult r = c.coordinateGet("k", 3, 2);
+    EXPECT_EQ(r.status, GetResult::Status::NOTFOUND);
+}
+
+TEST(Coordinator, DeleteFailsWhenWNotMet) {
+    Fixture f;
+    f.replicas.down = {"node2", "node3"};  // only the local write can ack
+    auto c = f.make();
+    PutResult d = c.coordinateDelete("k", VectorClock{}, 3, 2);
+    EXPECT_FALSE(d.ok);
+    EXPECT_EQ(d.error, "quorum_not_met");
+}
+
+TEST(Coordinator, GetReadRepairsStaleReplicaWithTombstone) {
+    Fixture f;
+    // Local holds a dominant tombstone; node2 still holds the old live value.
+    f.storage.put("k", (VersionedValue{"", clk({{"node1", 2}}), /*deleted=*/true}).serialize());
+    f.replicas.readProgram["node2"] = foundVersion("old", clk({{"node1", 1}}));
+    f.replicas.down = {"node3"};
+    auto c = f.make();
+
+    GetResult r = c.coordinateGet("k", 3, 2);
+    // Client sees the key as gone...
+    EXPECT_EQ(r.status, GetResult::Status::NOTFOUND);
+
+    // ...and the tombstone is pushed to the stale replica so the delete converges.
+    ASSERT_TRUE(f.replicas.waitForWrites(1, 2000ms));
+    VersionedValue repaired;
+    ASSERT_TRUE(f.replicas.lastWriteTo("node2", repaired));
+    EXPECT_TRUE(repaired.deleted);
+    EXPECT_EQ(repaired.clock.get("node1"), 2u);
+    EXPECT_EQ(f.metrics.readRepairCount(), 1u);
+}
+
+TEST(Coordinator, ConcurrentDeleteAndWriteReturnsSiblings) {
+    Fixture f;
+    // A tombstone and a live write with concurrent clocks (neither dominates):
+    // a real delete/update conflict — surface both, don't silently pick one.
+    f.storage.put("k", (VersionedValue{"", clk({{"node1", 1}}), /*deleted=*/true}).serialize());
+    f.replicas.readProgram["node2"] = foundVersion("written", clk({{"node2", 1}}));
+    f.replicas.down = {"node3"};
+    auto c = f.make();
+
+    GetResult r = c.coordinateGet("k", 3, 2);
+    ASSERT_EQ(r.status, GetResult::Status::SIBLINGS);
+    ASSERT_EQ(r.values.size(), 2u);
+    int tombstones = (r.values[0].deleted ? 1 : 0) + (r.values[1].deleted ? 1 : 0);
+    EXPECT_EQ(tombstones, 1);  // exactly one sibling is the tombstone
+    EXPECT_EQ(f.metrics.readRepairCount(), 0u);  // never repair across a conflict
+}
+
 // ---- End-to-end clock progression (dominance across sequential writes) ---
 
 TEST(Coordinator, SequentialWritesProduceDominatingClocks) {

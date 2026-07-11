@@ -11,11 +11,16 @@
 struct VersionedValue {
     std::string data;   // opaque user bytes (may contain '|', NUL, newlines)
     VectorClock clock;
+    bool deleted = false;  // tombstone: a delete is a versioned value like any other,
+                           // so it propagates by quorum + read repair (Dynamo-style),
+                           // not a silent drop. `data` is empty for a tombstone.
 
     // Storage form: a single self-contained string handed to StorageEngine::put.
-    // Layout: "<base64(data)>|<clock-token>". base64 never emits '|' and the
-    // clock token never contains '|', so the single '|' split is unambiguous even
-    // when the underlying data does contain pipes.
+    // Layout: "<base64(data)>|<clock-token>" for a live value, with an extra
+    // "|D" appended for a tombstone. base64 never emits '|' and the clock token
+    // never contains '|', so the split stays unambiguous even when the underlying
+    // data contains pipes. The two-field (and bare) forms written before
+    // tombstones existed still parse — deleted defaults to false.
     std::string serialize() const;
     static VersionedValue deserialize(const std::string &stored);
 };

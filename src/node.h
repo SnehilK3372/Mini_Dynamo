@@ -36,9 +36,11 @@ private:
     // Op handlers. Each writes a framed response to client_fd.
     void handlePut(const vector<string> &f, const string &rawPayload, int client_fd);
     void handleGet(const vector<string> &f, int client_fd);
+    void handleDelete(const vector<string> &f, const string &rawPayload, int client_fd);
     void handleReplicate(const vector<string> &f, int client_fd);   // coordinator→replica write
     void handleReadReplica(const vector<string> &f, int client_fd); // coordinator→replica read
     void handleJoin(const string &payload, int client_fd);
+    void handleRingQuery(int client_fd);  // read-only ring snapshot (does not mutate the ring)
 
     int effN(int requested) const { return requested > 0 ? requested : cfg_.N; }
     int effW(int requested) const { return requested > 0 ? requested : cfg_.W; }

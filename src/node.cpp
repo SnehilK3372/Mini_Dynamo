@@ -66,12 +66,16 @@ void Node::handleRequest(const string &payload, int client_fd) {
         handlePut(f, payload, client_fd);
     } else if (type == "GET") {
         handleGet(f, client_fd);
+    } else if (type == "DELETE") {
+        handleDelete(f, payload, client_fd);
     } else if (type == "REPLICATE") {
         handleReplicate(f, client_fd);
     } else if (type == "READ") {
         handleReadReplica(f, client_fd);
     } else if (type == "JOIN") {
         handleJoin(payload, client_fd);
+    } else if (type == "RING") {
+        handleRingQuery(client_fd);
     } else {
         reply(client_fd, "RESPONSE|ERROR|unknown_command");
     }
@@ -143,6 +147,37 @@ void Node::handleGet(const vector<string> &f, int client_fd) {
     }
 }
 
+// DELETE|<key>|<origin>|<N>|<W>|<clock>
+// A delete is coordinated by the key's primary owner exactly like a PUT (it must
+// stamp the tombstone's clock deterministically), so non-primaries forward it.
+void Node::handleDelete(const vector<string> &f, const string &rawPayload, int client_fd) {
+    const string key = field(f, 1);
+    auto owners = router_->findOwners(key, 1);
+    if (owners.empty()) {
+        reply(client_fd, "RESPONSE|ERROR|no_nodes_in_ring");
+        return;
+    }
+    const NodeInfo &primary = owners[0];
+    if (primary.node_id != info.node_id) {
+        TCPClient client;
+        string resp = client.sendAndReceiveFramed(primary.host, primary.port, rawPayload,
+                                                  static_cast<int>(cfg_.timeout.count()) * 2);
+        reply(client_fd, resp.empty() ? "RESPONSE|ERROR|forward_failed" : resp);
+        return;
+    }
+
+    VectorClock context = VectorClock::parse(field(f, 5));
+    int N = effN(toInt(f, 3));
+    int W = effW(toInt(f, 4));
+
+    PutResult pr = coordinator_->coordinateDelete(key, context, N, W);
+    if (pr.ok) {
+        reply(client_fd, "RESPONSE|OK|" + pr.clock.serialize());
+    } else {
+        reply(client_fd, "RESPONSE|ERROR|" + pr.error);
+    }
+}
+
 // REPLICATE|<key>|<b64value>|<origin>|<clock>  (coordinator -> replica write)
 void Node::handleReplicate(const vector<string> &f, int client_fd) {
     const string key = field(f, 1);
@@ -197,6 +232,20 @@ void Node::handleJoin(const string &payload, int client_fd) {
     ostringstream oss;
     oss << "RING_UPDATE\n" << current.size() << "\n";
     for (const auto &n : current) {
+        oss << n.node_id << "|" << n.host << "|" << n.port << "\n";
+    }
+    reply(client_fd, oss.str());
+}
+
+// RING|<origin>  → read-only snapshot of the physical ring. Unlike JOIN (which
+// returns the ring *and* adds the caller), this mutates nothing — it's what the
+// gateway calls to render the live ring without disturbing membership. A distinct
+// header ("RING", not "RING_UPDATE") keeps the two responses unambiguous.
+void Node::handleRingQuery(int client_fd) {
+    vector<NodeInfo> nodes = router_->getAllPhysicalNodes();
+    ostringstream oss;
+    oss << "RING\n" << nodes.size() << "\n";
+    for (const auto &n : nodes) {
         oss << n.node_id << "|" << n.host << "|" << n.port << "\n";
     }
     reply(client_fd, oss.str());

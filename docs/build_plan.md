@@ -93,47 +93,47 @@ Do the four pieces in this order. Each depends on the previous one.
 
 ### 1B.1 — Spring Boot gateway skeleton
 
-- [ ] New Maven module: Spring Boot 3.x, Java 17. Layered structure: `controller` / `service` / `repository`, with DTOs kept separate from any JPA entities.
-- [ ] Bean Validation on request bodies (`@Valid`, `@NotNull`, etc.).
-- [ ] Spring Boot Actuator enabled with `/actuator/health` and `/actuator/prometheus` (Micrometer wiring — the endpoint has to exist for Tier 1C to scrape it).
-- [ ] springdoc-openapi wired; Swagger UI serving.
+- [x] New Maven module: Spring Boot 3.x, Java 17. Layered structure: `controller` / `service` / `repository`, with DTOs kept separate from any JPA entities.
+- [x] Bean Validation on request bodies (`@Valid`, `@NotNull`, etc.).
+- [x] Spring Boot Actuator enabled with `/actuator/health` and `/actuator/prometheus` (Micrometer wiring — the endpoint has to exist for Tier 1C to scrape it).
+- [x] springdoc-openapi wired; Swagger UI serving.
 
 ### 1B.2 — REST API
 
-- [ ] `POST /v1/auth/token` — issues JWT (see 1B.3).
-- [ ] `PUT /v1/kv/{key}` — write; body carries value and optional client vector clock; query params for `N`, `W`, `R`.
-- [ ] `GET /v1/kv/{key}` — read; query params for `N`, `R`; response includes value(s) and current clock. If siblings exist, return them with status `409` (or `300` with body; document your choice).
-- [ ] `DELETE /v1/kv/{key}`.
-- [ ] `GET /v1/cluster/nodes` — node registry from Postgres.
-- [ ] `GET /v1/cluster/ring` — current ring snapshot from the cluster.
-- [ ] `503` when the cluster can't meet the requested quorum.
-- [ ] Version the API path (`/v1`).
+- [x] `POST /v1/auth/token` — issues JWT (see 1B.3).
+- [x] `PUT /v1/kv/{key}` — write; body carries value and optional client vector clock; query params for `N`, `W`, `R`.
+- [x] `GET /v1/kv/{key}` — read; query params for `N`, `R`; response includes value(s) and current clock. If siblings exist, return them with status `409` (or `300` with body; document your choice). *(Chose 409 Conflict.)*
+- [x] `DELETE /v1/kv/{key}`. *(Cluster-level tombstone — new `DELETE` verb in the C++ core.)*
+- [x] `GET /v1/cluster/nodes` — node registry from Postgres.
+- [x] `GET /v1/cluster/ring` — current ring snapshot from the cluster. *(New read-only `RING` verb in the C++ core.)*
+- [x] `503` when the cluster can't meet the requested quorum.
+- [x] Version the API path (`/v1`).
 
 ### 1B.3 — JWT auth via Spring Security
 
-- [ ] Spring Security config; JWT filter validating HMAC-SHA256 signature and expiry before any controller.
-- [ ] Route protection: `/v1/kv/**` and `/v1/cluster/**` require valid token; `/v1/auth/token` and Actuator health are public.
-- [ ] Short token expiry (15–60 min). Secret comes from env, not source.
-- [ ] JUnit/Mockito: valid token passes; expired token rejected (401); tampered token rejected (401); missing token rejected (401).
+- [x] Spring Security config; JWT filter validating HMAC-SHA256 signature and expiry before any controller.
+- [x] Route protection: `/v1/kv/**` and `/v1/cluster/**` require valid token; `/v1/auth/token` and Actuator health are public.
+- [x] Short token expiry (15–60 min). Secret comes from env, not source. *(Default 30 min.)*
+- [x] JUnit/Mockito: valid token passes; expired token rejected (401); tampered token rejected (401); missing token rejected (401). *(Covered by `JwtServiceTest` + the integration test's 401 matrix.)*
 
 ### 1B.4 — PostgreSQL metadata via Spring Data JPA
 
-- [ ] Add Postgres to `docker-compose.yml`. Spring Data JPA in the gateway.
-- [ ] Schema:
+- [x] Add Postgres to `docker-compose.yml`. Spring Data JPA in the gateway.
+- [x] Schema (Flyway `V1__init.sql`, `ddl-auto=validate`):
   - `nodes` — node registry (id, host, port, added_at, last_seen)
   - `config_versions` — versioned cluster config
   - `audit_log` — administrative operations (who, what, when, before/after)
-- [ ] Repositories, service layer, endpoints wired.
-- [ ] JUnit/Mockito unit tests; **Testcontainers** integration test against a real Postgres.
+- [x] Repositories, service layer, endpoints wired.
+- [x] JUnit/Mockito unit tests; **Testcontainers** integration test against a real Postgres.
 
 ### 1B.5 — Gateway ↔ cluster wiring
 
-- [ ] Java TCP client that speaks the existing cluster wire protocol; used by the service layer for `PUT`/`GET`/`DELETE` and for admin queries (`GET /v1/cluster/ring`).
-- [ ] Sensible timeouts and error mapping to HTTP status codes.
+- [x] Java TCP client that speaks the existing cluster wire protocol; used by the service layer for `PUT`/`GET`/`DELETE` and for admin queries (`GET /v1/cluster/ring`).
+- [x] Sensible timeouts and error mapping to HTTP status codes.
 
-**Definition of done:** `docker-compose up` brings up cluster + Postgres + gateway; every REST endpoint works end-to-end; JWT protects the right routes; Testcontainers integration test green; Swagger UI reachable.
+**Definition of done:** `docker-compose up` brings up cluster + Postgres + gateway; every REST endpoint works end-to-end; JWT protects the right routes; Testcontainers integration test green; Swagger UI reachable. — **DONE, verified end-to-end.**
 
-**Write `docs/decisions/tier-1b.md`.** Cover: why put a JVM gateway in front of a C++ cluster (the API-gateway pattern, cost is a hop and a JVM, alternative is exposing the cluster protocol directly); why layered architecture; why JWT over sessions; why Postgres for metadata (relational + ACID) rather than reusing RocksDB.
+**Write `docs/decisions/tier-1b.md`.** Cover: why put a JVM gateway in front of a C++ cluster (the API-gateway pattern, cost is a hop and a JVM, alternative is exposing the cluster protocol directly); why layered architecture; why JWT over sessions; why Postgres for metadata (relational + ACID) rather than reusing RocksDB. — **DONE.**
 
 **Honestly claimable:** Spring Boot REST API, JWT auth, PostgreSQL + JPA + SQL, Testcontainers integration testing.
 

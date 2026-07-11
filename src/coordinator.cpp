@@ -76,20 +76,42 @@ struct WriteQuorum {
 };
 }  // namespace
 
-PutResult Coordinator::coordinatePut(const string &key, const string &value,
-                                     const VectorClock &context, int N, int W) {
-    auto owners = router_->findOwners(key, N);
-    if (owners.empty()) return {false, {}, "no_nodes_in_ring"};
-
-    // Build the new clock. Base each entry on the client's context, but bump our
-    // own entry strictly above whatever we already hold locally, so that even a
-    // blind write (empty context) dominates our current version instead of being
-    // born already-dominated and silently lost.
+VectorClock Coordinator::bumpedClock(const string &key, const VectorClock &context) const {
+    // Base each entry on the client's context, but bump our own entry strictly
+    // above whatever we already hold locally, so that even a blind write (empty
+    // context) dominates our current version instead of being born
+    // already-dominated and silently lost.
     VectorClock newClock = context;
     uint64_t base = max(context.get(self_.node_id), localClock(key).get(self_.node_id));
     newClock.set(self_.node_id, base + 1);
+    return newClock;
+}
 
-    VersionedValue vv{value, newClock};
+PutResult Coordinator::coordinatePut(const string &key, const string &value,
+                                     const VectorClock &context, int N, int W) {
+    // A live write and a delete differ only in the payload they carry: a delete
+    // is a tombstone VersionedValue. Everything else — clock bump, quorum
+    // fan-out, never-regress replication — is identical, so both go through
+    // writeQuorum.
+    VersionedValue vv{value, bumpedClock(key, context), /*deleted=*/false};
+    return writeQuorum(key, vv, N, W);
+}
+
+// A delete is a versioned tombstone written by quorum, not a local erase: it
+// must dominate the value it removes and then converge onto the other replicas
+// (via replication now, read repair later) — otherwise a surviving replica would
+// resurrect the key on the next read.
+PutResult Coordinator::coordinateDelete(const string &key, const VectorClock &context, int N,
+                                        int W) {
+    VersionedValue tombstone{/*data=*/"", bumpedClock(key, context), /*deleted=*/true};
+    return writeQuorum(key, tombstone, N, W);
+}
+
+PutResult Coordinator::writeQuorum(const string &key, const VersionedValue &vv, int N, int W) {
+    auto owners = router_->findOwners(key, N);
+    if (owners.empty()) return {false, {}, "no_nodes_in_ring"};
+
+    const VectorClock &newClock = vv.clock;
     const string serialized = vv.serialize();
 
     auto q = make_shared<WriteQuorum>();
@@ -279,6 +301,12 @@ GetResult Coordinator::coordinateGet(const string &key, int N, int R) {
         bool stale = !r.found ||
                      VectorClock::compare(dominant.clock, r.vv.clock) == Ordering::A_DOMINATES;
         if (stale) repairAsync(r.peer, key, dominant);
+    }
+    // A dominant tombstone means the key is deleted: repair still ran above so the
+    // tombstone converges onto replicas that missed it (otherwise one of them
+    // could resurrect the key), but the client sees NOTFOUND, not the empty body.
+    if (dominant.deleted) {
+        return {GetResult::Status::NOTFOUND, {}, ""};
     }
     return {GetResult::Status::OK, {dominant}, ""};
 }

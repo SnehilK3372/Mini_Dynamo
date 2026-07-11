@@ -1,0 +1,55 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: mini-dynamo-gateway
+  datasource:
+    # Overridden by env in Docker (host "postgres"); defaults suit a local run.
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/minidynamo}
+    username: ${DB_USERNAME:minidynamo}
+    password: ${DB_PASSWORD:minidynamo}
+  jpa:
+    hibernate:
+      # Flyway owns the schema; JPA only validates its mappings against it.
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # Health + Prometheus are what Tier 1C scrapes; info is harmless.
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+# Where the C++ cluster lives and how patiently to talk to it.
+cluster:
+  nodes: ${CLUSTER_NODES:localhost:5001,localhost:5002,localhost:5003}
+  connect-timeout-ms: ${CLUSTER_CONNECT_TIMEOUT_MS:1000}
+  read-timeout-ms: ${CLUSTER_READ_TIMEOUT_MS:2000}
+
+# JWT signing. The secret MUST be provided via env in any real deployment; the
+# default here is an obvious dev-only placeholder (and is long enough for HS256).
+jwt:
+  secret: ${JWT_SECRET:dev-only-insecure-secret-change-me-please-0123456789}
+  expiry-minutes: ${JWT_EXPIRY_MINUTES:30}
+
+# The single demo credential the token endpoint accepts.
+auth:
+  username: ${AUTH_USERNAME:admin}
+  password: ${AUTH_PASSWORD:changeme}
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html

@@ -36,3 +36,40 @@ TEST(VersionedValue, EmptyData) {
     EXPECT_EQ(back.data, "");
     EXPECT_EQ(back.clock.get("n"), 5u);
 }
+
+TEST(VersionedValue, TombstoneRoundTrips) {
+    VersionedValue vv;
+    vv.deleted = true;
+    vv.clock.set("node1", 3);
+
+    VersionedValue back = VersionedValue::deserialize(vv.serialize());
+    EXPECT_TRUE(back.deleted);
+    EXPECT_EQ(back.data, "");
+    EXPECT_EQ(back.clock.get("node1"), 3u);
+}
+
+TEST(VersionedValue, LiveValueIsNotDeletedAndStaysTwoField) {
+    // A live value must serialize byte-identically to the pre-tombstone format
+    // (exactly one '|'), so nothing already on disk changes meaning.
+    VersionedValue vv;
+    vv.data = "payload";
+    vv.clock.set("node1", 1);
+
+    std::string s = vv.serialize();
+    EXPECT_EQ(std::count(s.begin(), s.end(), '|'), 1);
+    EXPECT_FALSE(VersionedValue::deserialize(s).deleted);
+}
+
+TEST(VersionedValue, TombstonePreservesPipeHeavyClockBoundary) {
+    // Even when data is pipe-laden, the tombstone marker is the *last* field and
+    // the clock in the middle is recovered intact.
+    VersionedValue vv;
+    vv.data = "a|b|c";
+    vv.deleted = true;
+    vv.clock.set("node2", 7);
+
+    VersionedValue back = VersionedValue::deserialize(vv.serialize());
+    EXPECT_EQ(back.data, "a|b|c");
+    EXPECT_TRUE(back.deleted);
+    EXPECT_EQ(back.clock.get("node2"), 7u);
+}
