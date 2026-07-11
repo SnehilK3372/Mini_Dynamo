@@ -94,6 +94,13 @@ cancels superseded runs. A status badge is in the README.
 - **Branch protection is out-of-band.** Requiring a green run before merge to `main` is a GitHub
   repo-admin setting the workflow can't self-apply (see below); until it's switched on, CI reports
   status but does not *enforce* it.
+- **Write availability under node failure is partial, and slow to fail.** Writing this e2e surfaced
+  a real system property (not a test bug): a `PUT` to a key whose *primary* owner is the downed node
+  is forwarded to that dead primary and returns `502 forward_failed` only after the forward times out
+  (~3–9s observed). Keys primaried on a live node still meet `W=2` instantly. So the e2e asserts
+  *partial* write availability (≥1 success) plus read availability + convergence — the honest thesis
+  for a store without hinted handoff. Hinted handoff (accept the write on a stand-in and hand it off
+  later) and faster failure detection are the named future work that would close both gaps.
 
 ## Enabling branch protection (manual, one-time)
 
@@ -118,7 +125,11 @@ Confirmed:
   Failsafe **`RealClusterIT` 2/2** driving the gateway against the real node container →
   BUILD SUCCESS.
 
-Confirmed as part of this tier's verification pass (results appended in the follow-up):
-- **e2e** — `scripts/e2e.sh` on the full compose stack (availability under a node kill +
-  read-repair convergence, the scenario proven live in Tier 1C).
-- **images** — both production Dockerfiles build (node with prometheus ON, gateway jar).
+- **images — green.** `docker compose up --build` builds all four production images (three
+  nodes with prometheus ON + gateway jar).
+- **e2e — green.** `scripts/e2e.sh` on the full stack: gateway healthy, baseline `PUT W=2` /
+  `GET R=2` round-trip, node2 killed → read still served (**availability under one failure**),
+  **5/8** degraded writes succeed (the 3 failures are keys primaried on the downed node — the
+  502 `forward_failed` documented above), then node2 restarts and re-reads drive
+  `read_repair_total` **0 → 5** (**convergence** — exactly the 5 committed writes node2 missed).
+  `E2E PASSED`, exit 0.

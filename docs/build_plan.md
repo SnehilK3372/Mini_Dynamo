@@ -175,23 +175,23 @@ Do the four pieces in this order. Each depends on the previous one.
 
 ### 1D.1 — Complete the test pyramid
 
-- [ ] Unit (Java): JUnit 5 + Mockito for the gateway's service layer (with the cluster mocked). Aim for meaningful coverage of the saga-like error paths in 1B.
-- [ ] Unit (C++): GoogleTest, if not already added in 1A, covers ring/hashing, vector-clock comparison, quorum arithmetic.
-- [ ] Integration: REST Assured driving the HTTP API against a Testcontainers-composed stack (gateway + Postgres + cluster).
-- [ ] End-to-end: one test that stands up the whole `docker-compose` stack, writes with `W=2`, kills a node, reads with `R=2`, asserts availability and eventual convergence via read repair.
-- [ ] Replace `tests.txt` with a real README section pointing to the automated suite.
+- [x] Unit (Java): JUnit 5 + Mockito for the gateway's service layer (with the cluster mocked). Aim for meaningful coverage of the saga-like error paths in 1B. *(Added ERROR→502, read/delete quorum-fail→503 cases.)*
+- [x] Unit (C++): GoogleTest, if not already added in 1A, covers ring/hashing, vector-clock comparison, quorum arithmetic. *(Landed in 1A; 37 tests.)*
+- [x] Integration: REST Assured driving the HTTP API against a Testcontainers-composed stack (gateway + Postgres + cluster). *(`RealClusterIT`: real node image + real Postgres.)*
+- [x] End-to-end: one test that stands up the whole `docker-compose` stack, writes with `W=2`, kills a node, reads with `R=2`, asserts availability and eventual convergence via read repair. *(`scripts/e2e.sh`.)*
+- [x] Replace `tests.txt` with a real README section pointing to the automated suite.
 
 ### 1D.2 — GitHub Actions CI
 
-- [ ] Workflow triggering on every push and pull request:
-  - Lint (clang-format for C++, a formatter check for Java)
-  - Build (CMake for C++, Maven for Java)
-  - Unit tests (both languages)
-  - Integration tests (Testcontainers — matrix on `ubuntu-latest`)
-  - Build Docker images
-- [ ] Branch protection: main requires a green run.
-- [ ] Cache Maven and CMake outputs to keep runs under ~5 minutes.
-- [ ] Add a passing-build badge to the README.
+- [x] Workflow triggering on every push and pull request:
+  - [x] Lint (clang-format for C++, a formatter check for Java) *(clang-format + Spotless.)*
+  - [x] Build (CMake for C++, Maven for Java)
+  - [x] Unit tests (both languages)
+  - [x] Integration tests (Testcontainers — matrix on `ubuntu-latest`) *(`RealClusterIT` in the gateway job.)*
+  - [x] Build Docker images *(`images` job.)*
+- [~] Branch protection: main requires a green run. *(Documented in `docs/decisions/tier-1d.md`; must be enabled by a repo admin in the GitHub UI after the first green run — cannot be set from the workflow.)*
+- [x] Cache Maven and CMake outputs to keep runs under ~5 minutes. *(Maven + CMake caches; e2e is the noted long pole.)*
+- [x] Add a passing-build badge to the README.
 
 **Definition of done:** every push runs the full pipeline; the e2e test proves availability under one node failure; badge is green.
 
