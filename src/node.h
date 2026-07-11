@@ -20,7 +20,7 @@ class Router;
 // response. The TCP accept loop lives in TCPServer, which calls handleRequest —
 // this class has no networking loop of its own.
 class Node {
-public:
+   public:
     // Storage and Metrics are injected: RocksDB + PrometheusMetrics in production,
     // in-memory versions for a memory-only build/tests. Passing a null Metrics
     // selects InMemoryMetrics, so existing call sites (and tests) keep working
@@ -34,13 +34,13 @@ public:
 
     NodeInfo info;
 
-private:
+   private:
     // Op handlers. Each writes a framed response to client_fd.
     void handlePut(const vector<string> &f, const string &rawPayload, int client_fd);
     void handleGet(const vector<string> &f, int client_fd);
     void handleDelete(const vector<string> &f, const string &rawPayload, int client_fd);
-    void handleReplicate(const vector<string> &f, int client_fd);   // coordinator→replica write
-    void handleReadReplica(const vector<string> &f, int client_fd); // coordinator→replica read
+    void handleReplicate(const vector<string> &f, int client_fd);    // coordinator→replica write
+    void handleReadReplica(const vector<string> &f, int client_fd);  // coordinator→replica read
     void handleJoin(const string &payload, int client_fd);
     void handleRingQuery(int client_fd);  // read-only ring snapshot (does not mutate the ring)
 

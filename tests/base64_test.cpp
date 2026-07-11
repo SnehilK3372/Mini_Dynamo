@@ -7,8 +7,8 @@
 using std::string;
 
 TEST(Base64, RoundTripsAsciiAndEmpty) {
-    for (const string &s : {string(""), string("a"), string("ab"), string("abc"),
-                            string("hello world")}) {
+    for (const string &s :
+         {string(""), string("a"), string("ab"), string("abc"), string("hello world")}) {
         EXPECT_EQ(base64::decode(base64::encode(s)), s);
     }
 }

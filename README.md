@@ -1,5 +1,7 @@
 # Mini Dynamo
 
+[![CI](https://github.com/SnehilK3372/Mini_Dynamo/actions/workflows/ci.yml/badge.svg)](https://github.com/SnehilK3372/Mini_Dynamo/actions/workflows/ci.yml)
+
 A distributed key-value store in C++17, modeled on [Amazon's Dynamo](https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf). Keys are placed on a **consistent-hashing ring with virtual nodes**; any node can accept a request and acts as **coordinator**, routing it to the key's owners. Writes are versioned with **vector clocks**, replicated to N owners, and acknowledged by a **write quorum (W)**; reads gather a **read quorum (R)**, reconcile versions, return the current value (or conflicting **siblings**), and **repair** stale replicas. Each node persists to its own **RocksDB** instance. New nodes join through a bootstrap handshake.
 
 This README describes what the system does **today** (through Tier 1A). The roadmap and the full architectural reasoning are in [docs/build_plan.md](docs/build_plan.md) and [docs/full_arch.md](docs/full_arch.md); the per-tier decisions are in [docs/decisions/](docs/decisions/).
@@ -41,7 +43,7 @@ A node is configured entirely by environment variables:
 | `STORAGE_ENGINE` | `rocksdb` (default when compiled with RocksDB) or `memory` |
 | `DATA_DIR` | RocksDB directory (default `/data/<NODE_ID>`) |
 
-Building outside Docker requires Linux (POSIX sockets): `cmake -S . -B build && cmake --build build -j4` produces `build/kvstore`. Unit tests build anywhere (see [tests.txt](tests.txt)).
+Building outside Docker requires Linux (POSIX sockets): `cmake -S . -B build && cmake --build build -j4` produces `build/kvstore`. Unit tests build anywhere (see [Testing](#testing)).
 
 ## Wire protocol
 
@@ -55,7 +57,23 @@ Plain TCP, **length-prefixed framed** (`<byte-length>\n<payload>`), payload pipe
 | `READ\|<key>\|<origin>` | `VAL\|<b64value>\|<clock>` or `VAL\|NOTFOUND` (internal) |
 | `JOIN\|<node_id>\|<value>\|<origin>\|<host>\|<port>` | `RING_UPDATE\n<count>\n<id>\|<host>\|<port>\n...` |
 
-See [tests.txt](tests.txt) for framed `netcat` examples and the automated test commands.
+## Testing
+
+The suite covers the classic pyramid, and the whole thing runs in CI on every push and pull request (see the badge at the top).
+
+**Unit**
+- **C++ (GoogleTest):** ring/hashing, vector-clock comparison, quorum arithmetic, base64, versioned-value/tombstone round-trips, RocksDB persistence.
+  `cmake -S . -B build -DBUILD_TESTING=ON && cmake --build build -j4 && ctest --test-dir build`
+- **Java (JUnit 5 + Mockito):** the gateway service layer with the cluster mocked (incl. the 404/409/502/503 error paths), JWT issue/validate, and the cluster wire codec.
+  `cd gateway && ./mvnw test`
+
+**Integration (Testcontainers — Docker required)**
+- `GatewayIntegrationTest` drives the HTTP API (REST Assured) against a real PostgreSQL and a framed fake cluster; `RealClusterIT` does the same against the **actual C++ node image**, proving the real on-the-wire protocol.
+  `docker build -t mini-dynamo-node:ci . && cd gateway && NODE_IMAGE=mini-dynamo-node:ci ./mvnw verify`
+
+**End-to-end (whole stack, one command)**
+- `scripts/e2e.sh` brings up the full `docker compose` stack, writes with `W=2`, kills a node and reads with `R=2` to prove **availability under one failure**, then restarts the node and reads to prove **convergence via read repair**.
+  `scripts/e2e.sh`
 
 ## Future work
 

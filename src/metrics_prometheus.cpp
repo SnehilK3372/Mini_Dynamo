@@ -1,12 +1,12 @@
 #include "metrics_prometheus.h"
 
-#include <map>
-
 #include <prometheus/counter.h>
 #include <prometheus/exposer.h>
 #include <prometheus/gauge.h>
 #include <prometheus/histogram.h>
 #include <prometheus/registry.h>
+
+#include <map>
 
 using prometheus::BuildCounter;
 using prometheus::BuildGauge;

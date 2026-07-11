@@ -27,8 +27,8 @@ struct QuorumConfig {
 
 struct PutResult {
     bool ok = false;
-    VectorClock clock;   // the new clock, returned so the client can use it as context
-    std::string error;   // set when !ok, e.g. "quorum_not_met"
+    VectorClock clock;  // the new clock, returned so the client can use it as context
+    std::string error;  // set when !ok, e.g. "quorum_not_met"
 };
 
 struct GetResult {
@@ -43,9 +43,9 @@ struct GetResult {
 // its own node's StorageEngine — which is why the whole thing is unit-testable
 // with a fake client and an in-memory store.
 class Coordinator {
-public:
-    Coordinator(NodeInfo self, Router *router, StorageEngine *storage,
-                ReplicaClient *replicas, Metrics *metrics, QuorumConfig defaults = {});
+   public:
+    Coordinator(NodeInfo self, Router *router, StorageEngine *storage, ReplicaClient *replicas,
+                Metrics *metrics, QuorumConfig defaults = {});
 
     // Blocks until every background fan-out / read-repair thread this coordinator
     // launched has finished. This guarantees no detached worker outlives the
@@ -76,7 +76,7 @@ public:
 
     const QuorumConfig &defaults() const { return defaults_; }
 
-private:
+   private:
     // Reads this node's own stored clock for a key (empty if absent). Used so a
     // blind write is bumped above what we already hold and can never be born
     // already-dominated.
@@ -95,8 +95,7 @@ private:
     // Fire-and-forget: push `value` to `peer` (or to local storage if peer is
     // self) on a background thread, bumping the read-repair metric. Never blocks
     // the caller — read repair must add zero latency to the read it rides on.
-    void repairAsync(const NodeInfo &peer, const std::string &key,
-                     const VersionedValue &value);
+    void repairAsync(const NodeInfo &peer, const std::string &key, const VersionedValue &value);
 
     // Runs `fn` on a detached thread, registered with the background tracker so
     // the destructor can wait for it. `fn` must capture everything it needs by

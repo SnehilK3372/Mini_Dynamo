@@ -112,8 +112,12 @@ class GatewayIntegrationTest {
     @Test
     void protectedRouteRejectsTamperedToken() {
         String token = jwtService(30).issue("admin", List.of("ADMIN"));
-        char last = token.charAt(token.length() - 1);
-        String tampered = token.substring(0, token.length() - 1) + (last == 'A' ? 'B' : 'A');
+        // Mutate the FIRST signature char (high-order bits) so the tamper is
+        // deterministic — flipping the last base64url char can toggle only an
+        // insignificant padding bit and leave the signature valid.
+        int sig = token.lastIndexOf('.') + 1;
+        char c = token.charAt(sig);
+        String tampered = token.substring(0, sig) + (c == 'A' ? 'B' : 'A') + token.substring(sig + 1);
         given().header("Authorization", "Bearer " + tampered)
             .when().get("/v1/cluster/ring")
             .then().statusCode(401);

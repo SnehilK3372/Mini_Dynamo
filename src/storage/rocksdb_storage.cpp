@@ -37,8 +37,7 @@ optional<string> RocksDBStorageEngine::get(const string &key) {
     return nullopt;  // NotFound (or any read error) → absent
 }
 
-void RocksDBStorageEngine::forEach(
-    const function<void(const string &, const string &)> &fn) {
+void RocksDBStorageEngine::forEach(const function<void(const string &, const string &)> &fn) {
     unique_ptr<rocksdb::Iterator> it(db_->NewIterator(rocksdb::ReadOptions()));
     for (it->SeekToFirst(); it->Valid(); it->Next()) {
         fn(it->key().ToString(), it->value().ToString());

@@ -10,10 +10,10 @@
 // now a request that waits for an acknowledgement, which is what makes real W/R
 // quorum possible.
 class TCPClient {
-public:
+   public:
     // Returns the peer's framed reply payload, or "" on any failure (DNS,
     // connect timeout, send/recv error, malformed frame). `timeout_ms` bounds
     // both the connect and the read so a dead peer can't wedge the caller.
-    std::string sendAndReceiveFramed(const std::string &host, int port,
-                                     const std::string &data, int timeout_ms = 2000);
+    std::string sendAndReceiveFramed(const std::string &host, int port, const std::string &data,
+                                     int timeout_ms = 2000);
 };

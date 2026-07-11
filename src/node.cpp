@@ -143,8 +143,7 @@ void Node::handleGet(const vector<string> &f, int client_fd) {
         case GetResult::Status::OK: {
             const auto &v = gr.values.front();
             jlog::op("info", "get", key, "ok");
-            reply(client_fd,
-                  "RESPONSE|OK|" + base64::encode(v.data) + "|" + v.clock.serialize());
+            reply(client_fd, "RESPONSE|OK|" + base64::encode(v.data) + "|" + v.clock.serialize());
             break;
         }
         case GetResult::Status::SIBLINGS: {

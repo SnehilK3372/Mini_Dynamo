@@ -19,7 +19,7 @@
 //  - Implementations own their thread safety. Callers (Node handlers run on
 //    one detached thread per connection) may call concurrently.
 class StorageEngine {
-public:
+   public:
     virtual ~StorageEngine() = default;
 
     // Store or overwrite key -> value.

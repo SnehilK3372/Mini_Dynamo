@@ -11,9 +11,12 @@ enum class Op { Put, Get, Delete };
 
 inline const char *opLabel(Op op) {
     switch (op) {
-        case Op::Put:    return "put";
-        case Op::Get:    return "get";
-        case Op::Delete: return "delete";
+        case Op::Put:
+            return "put";
+        case Op::Get:
+            return "get";
+        case Op::Delete:
+            return "delete";
     }
     return "unknown";
 }
@@ -26,7 +29,7 @@ inline const char *opLabel(Op op) {
 // against this header + InMemoryMetrics; the Prometheus implementation lives in
 // the node-only translation unit metrics_prometheus.cpp.
 class Metrics {
-public:
+   public:
     virtual ~Metrics() = default;
 
     // One client-facing request of the given op arrived at this node.
@@ -48,7 +51,7 @@ public:
 // signals. Latency is dropped here — histograms only matter once something is
 // scraping them, which is the Prometheus backend's job.
 class InMemoryMetrics : public Metrics {
-public:
+   public:
     void incRequest(Op) override { requests_.fetch_add(1, std::memory_order_relaxed); }
     void observeLatency(Op, double) override {}
     void incQuorumSuccess(Op) override { quorum_ok_.fetch_add(1, std::memory_order_relaxed); }
@@ -65,7 +68,7 @@ public:
     uint64_t quorumSuccessCount() const { return quorum_ok_.load(std::memory_order_relaxed); }
     uint64_t quorumFailureCount() const { return quorum_fail_.load(std::memory_order_relaxed); }
 
-private:
+   private:
     std::atomic<uint64_t> requests_{0};
     std::atomic<uint64_t> quorum_ok_{0};
     std::atomic<uint64_t> quorum_fail_{0};

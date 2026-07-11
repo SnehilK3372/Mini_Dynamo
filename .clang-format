@@ -1,0 +1,8 @@
+# Matches the existing C++ style: Google base, but 4-space indent, 100-column
+# lines, and pointers/references bound to the name (`Type *x`). The CI lint job
+# runs `clang-format --dry-run -Werror` against this.
+BasedOnStyle: Google
+IndentWidth: 4
+ColumnLimit: 100
+PointerAlignment: Right
+DerivePointerAlignment: false

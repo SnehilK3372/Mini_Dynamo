@@ -22,8 +22,13 @@ COPY . .
 
 # Build only the node binary here (BUILD_TESTING=OFF keeps the image build from
 # fetching GoogleTest); the test suite runs in CI, not in the runtime image.
-# WITH_PROMETHEUS is ON by default, so kvstore gets its /metrics endpoint.
-RUN cmake -S . -B build -DBUILD_TESTING=OFF && cmake --build build -j4
+# WITH_PROMETHEUS is ON by default, so kvstore gets its /metrics endpoint. CI's
+# integration/e2e jobs pass --build-arg WITH_PROMETHEUS=OFF to skip the
+# prometheus-cpp FetchContent (they test availability/protocol, not metrics),
+# which keeps those builds fast; the image-publish job builds with it ON.
+ARG WITH_PROMETHEUS=ON
+RUN cmake -S . -B build -DBUILD_TESTING=OFF -DWITH_PROMETHEUS=${WITH_PROMETHEUS} \
+    && cmake --build build -j4
 
 # Parent directory for each node's own RocksDB instance (DATA_DIR default is
 # /data/<node_id>). Shared-nothing: every container has its own /data.

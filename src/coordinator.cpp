@@ -155,9 +155,7 @@ PutResult Coordinator::writeQuorum(const string &key, const VersionedValue &vv, 
     int finalAcks;
     {
         unique_lock<mutex> lk(q->m);
-        q->cv.wait_until(lk, deadline, [&] {
-            return q->acks >= W || q->completed == remoteCount;
-        });
+        q->cv.wait_until(lk, deadline, [&] { return q->acks >= W || q->completed == remoteCount; });
         finalAcks = q->acks;
     }
 
@@ -313,8 +311,8 @@ GetResult Coordinator::coordinateGet(const string &key, int N, int R) {
     // threads, so the read has already returned by the time they land.
     const VersionedValue &dominant = maximal.front();
     for (const auto &r : responses) {
-        bool stale = !r.found ||
-                     VectorClock::compare(dominant.clock, r.vv.clock) == Ordering::A_DOMINATES;
+        bool stale =
+            !r.found || VectorClock::compare(dominant.clock, r.vv.clock) == Ordering::A_DOMINATES;
         if (stale) repairAsync(r.peer, key, dominant);
     }
     // A dominant tombstone means the key is deleted: repair still ran above so the

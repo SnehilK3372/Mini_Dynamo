@@ -6,8 +6,7 @@
 namespace base64 {
 
 namespace {
-constexpr char kAlphabet[] =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+constexpr char kAlphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 // Reverse lookup: maps an encoded char back to its 6-bit value, 0xFF for
 // anything that is not part of the alphabet (padding, whitespace, garbage).
@@ -29,8 +28,7 @@ std::string encode(const std::string &raw) {
     size_t i = 0;
     for (; i + 3 <= raw.size(); i += 3) {
         uint32_t n = (static_cast<uint8_t>(raw[i]) << 16) |
-                     (static_cast<uint8_t>(raw[i + 1]) << 8) |
-                     (static_cast<uint8_t>(raw[i + 2]));
+                     (static_cast<uint8_t>(raw[i + 1]) << 8) | (static_cast<uint8_t>(raw[i + 2]));
         out.push_back(kAlphabet[(n >> 18) & 0x3F]);
         out.push_back(kAlphabet[(n >> 12) & 0x3F]);
         out.push_back(kAlphabet[(n >> 6) & 0x3F]);
@@ -46,8 +44,7 @@ std::string encode(const std::string &raw) {
         out.push_back('=');
         out.push_back('=');
     } else if (rem == 2) {
-        uint32_t n = (static_cast<uint8_t>(raw[i]) << 16) |
-                     (static_cast<uint8_t>(raw[i + 1]) << 8);
+        uint32_t n = (static_cast<uint8_t>(raw[i]) << 16) | (static_cast<uint8_t>(raw[i + 1]) << 8);
         out.push_back(kAlphabet[(n >> 18) & 0x3F]);
         out.push_back(kAlphabet[(n >> 12) & 0x3F]);
         out.push_back(kAlphabet[(n >> 6) & 0x3F]);

@@ -10,9 +10,9 @@
 #include <set>
 #include <thread>
 
+#include "metrics.h"
 #include "router.h"
 #include "storage/in_memory_storage.h"
-#include "metrics.h"
 
 using namespace std::chrono_literals;
 using std::string;
@@ -25,13 +25,12 @@ using std::string;
 // instead of sleeping.
 // ---------------------------------------------------------------------------
 class FakeReplicaClient : public ReplicaClient {
-public:
+   public:
     std::set<string> down;                            // ok=false for read and write
     std::set<string> slowWrite;                       // block ~3x timeout, then proceed
     std::map<string, ReplicaReadResult> readProgram;  // per-node programmed read
 
-    ReplicaWriteResult writeReplica(const NodeInfo &peer, const string &,
-                                    const VersionedValue &v,
+    ReplicaWriteResult writeReplica(const NodeInfo &peer, const string &, const VersionedValue &v,
                                     std::chrono::milliseconds timeout) override {
         InflightGuard g(inflight_);
         if (slowWrite.count(peer.node_id)) std::this_thread::sleep_for(timeout * 3);
@@ -78,7 +77,7 @@ public:
         while (inflight_.load() > 0) std::this_thread::yield();
     }
 
-private:
+   private:
     struct InflightGuard {
         std::atomic<int> &c;
         explicit InflightGuard(std::atomic<int> &c_) : c(c_) { c.fetch_add(1); }
@@ -308,7 +307,7 @@ TEST(Coordinator, ConcurrentDeleteAndWriteReturnsSiblings) {
     ASSERT_EQ(r.status, GetResult::Status::SIBLINGS);
     ASSERT_EQ(r.values.size(), 2u);
     int tombstones = (r.values[0].deleted ? 1 : 0) + (r.values[1].deleted ? 1 : 0);
-    EXPECT_EQ(tombstones, 1);  // exactly one sibling is the tombstone
+    EXPECT_EQ(tombstones, 1);                    // exactly one sibling is the tombstone
     EXPECT_EQ(f.metrics.readRepairCount(), 0u);  // never repair across a conflict
 }
 

@@ -21,7 +21,7 @@
 // entries are never stored, so an absent node and an explicit 0 are the same
 // thing — get() returns 0 for anything not present.
 class VectorClock {
-public:
+   public:
     enum class Ordering {
         EQUAL,        // identical causal history
         A_DOMINATES,  // a is a strict causal descendant of b (a supersedes b)
@@ -53,6 +53,6 @@ public:
     bool operator==(const VectorClock &other) const { return counts_ == other.counts_; }
     bool operator!=(const VectorClock &other) const { return !(*this == other); }
 
-private:
+   private:
     std::map<std::string, uint64_t> counts_;
 };

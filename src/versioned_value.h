@@ -9,7 +9,7 @@
 // byte map (it never learns about clocks), and all versioning logic lives above
 // it — exactly the separation storage_engine.h was designed for in Tier 0.
 struct VersionedValue {
-    std::string data;   // opaque user bytes (may contain '|', NUL, newlines)
+    std::string data;  // opaque user bytes (may contain '|', NUL, newlines)
     VectorClock clock;
     bool deleted = false;  // tombstone: a delete is a versioned value like any other,
                            // so it propagates by quorum + read repair (Dynamo-style),

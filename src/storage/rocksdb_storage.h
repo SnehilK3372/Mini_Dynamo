@@ -21,7 +21,7 @@ class DB;
 // Compiled only when the build found RocksDB (HAVE_ROCKSDB). The in-memory
 // engine remains the fallback and the test engine.
 class RocksDBStorageEngine : public StorageEngine {
-public:
+   public:
     // Opens (creating if needed) a RocksDB database at `path`. Throws
     // std::runtime_error if the database cannot be opened.
     explicit RocksDBStorageEngine(const std::string &path);
@@ -32,7 +32,7 @@ public:
     void forEach(
         const std::function<void(const std::string &key, const std::string &value)> &fn) override;
 
-private:
+   private:
     std::unique_ptr<rocksdb::DB> db_;
 };
 

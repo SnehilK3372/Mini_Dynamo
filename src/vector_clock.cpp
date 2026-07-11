@@ -19,9 +19,7 @@ void VectorClock::set(const string &node, uint64_t counter) {
     }
 }
 
-void VectorClock::increment(const string &node) {
-    counts_[node] += 1;
-}
+void VectorClock::increment(const string &node) { counts_[node] += 1; }
 
 VectorClock::Ordering VectorClock::compare(const VectorClock &a, const VectorClock &b) {
     bool aGreaterSomewhere = false;
@@ -32,8 +30,10 @@ VectorClock::Ordering VectorClock::compare(const VectorClock &a, const VectorClo
     // straight lookups per side reads clearer and costs nothing that matters.
     for (const auto &kv : a.counts_) {
         uint64_t bv = b.get(kv.first);
-        if (kv.second > bv) aGreaterSomewhere = true;
-        else if (bv > kv.second) bGreaterSomewhere = true;
+        if (kv.second > bv)
+            aGreaterSomewhere = true;
+        else if (bv > kv.second)
+            bGreaterSomewhere = true;
     }
     for (const auto &kv : b.counts_) {
         if (a.counts_.find(kv.first) != a.counts_.end()) continue;  // already counted

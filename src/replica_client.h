@@ -27,7 +27,7 @@ struct ReplicaReadResult {
 };
 
 class ReplicaClient {
-public:
+   public:
     virtual ~ReplicaClient() = default;
 
     virtual ReplicaWriteResult writeReplica(const NodeInfo &peer, const std::string &key,

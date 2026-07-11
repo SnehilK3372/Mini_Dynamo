@@ -33,8 +33,8 @@ ReplicaWriteResult TcpReplicaClient::writeReplica(const NodeInfo &peer, const st
                  value.clock.serialize();
 
     TCPClient client;
-    string reply = client.sendAndReceiveFramed(peer.host, peer.port, msg,
-                                               static_cast<int>(timeout.count()));
+    string reply =
+        client.sendAndReceiveFramed(peer.host, peer.port, msg, static_cast<int>(timeout.count()));
     ReplicaWriteResult r;
     // Any well-formed OK acknowledgement counts; anything else (empty reply from a
     // timeout/refusal, or an ERROR status) is a non-ack.
@@ -47,8 +47,8 @@ ReplicaReadResult TcpReplicaClient::readReplica(const NodeInfo &peer, const stri
     string msg = "READ|" + key + "|" + origin_;
 
     TCPClient client;
-    string reply = client.sendAndReceiveFramed(peer.host, peer.port, msg,
-                                               static_cast<int>(timeout.count()));
+    string reply =
+        client.sendAndReceiveFramed(peer.host, peer.port, msg, static_cast<int>(timeout.count()));
     ReplicaReadResult r;
     if (reply.empty()) return r;  // ok=false: the replica did not respond
 

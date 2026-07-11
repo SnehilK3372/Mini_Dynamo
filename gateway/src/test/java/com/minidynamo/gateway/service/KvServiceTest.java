@@ -16,6 +16,7 @@ import com.minidynamo.gateway.dto.KvValueResponse;
 import com.minidynamo.gateway.dto.KvWriteRequest;
 import com.minidynamo.gateway.dto.WriteResponse;
 import com.minidynamo.gateway.entity.AuditLogEntity;
+import com.minidynamo.gateway.exception.ClusterProtocolException;
 import com.minidynamo.gateway.exception.KeyNotFoundException;
 import com.minidynamo.gateway.exception.QuorumNotMetException;
 import com.minidynamo.gateway.exception.SiblingsConflictException;
@@ -72,6 +73,31 @@ class KvServiceTest {
         when(cluster.put(any(), any(), any(), anyInt(), anyInt(), anyInt()))
                 .thenReturn(WriteResult.quorumFailed());
         assertThatThrownBy(() -> service.put("k", new KvWriteRequest("v", null), null, null, null))
+                .isInstanceOf(QuorumNotMetException.class);
+    }
+
+    @Test
+    void putClusterErrorMapsToProtocolException() {
+        // An upstream protocol/other error (not a quorum miss) surfaces as 502.
+        when(cluster.put(any(), any(), any(), anyInt(), anyInt(), anyInt()))
+                .thenReturn(WriteResult.error("bad_upstream"));
+        assertThatThrownBy(() -> service.put("k", new KvWriteRequest("v", null), null, null, null))
+                .isInstanceOf(ClusterProtocolException.class);
+    }
+
+    @Test
+    void getQuorumFailureMapsToException() {
+        when(cluster.get("k", 3, 2)).thenReturn(ReadResult.quorumFailed());
+        assertThatThrownBy(() -> service.get("k", null, null))
+                .isInstanceOf(QuorumNotMetException.class);
+    }
+
+    @Test
+    void deleteQuorumFailureMapsToException() {
+        // captureBefore reads first (best-effort), then the delete itself misses W.
+        when(cluster.get("k", 3, 2)).thenReturn(ReadResult.ok(vv("old", "node1:1")));
+        when(cluster.delete("k", null, 3, 2)).thenReturn(WriteResult.quorumFailed());
+        assertThatThrownBy(() -> service.delete("k", null, null, null, "admin"))
                 .isInstanceOf(QuorumNotMetException.class);
     }
 

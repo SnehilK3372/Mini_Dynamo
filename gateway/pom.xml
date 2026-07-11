@@ -26,6 +26,7 @@
         <springdoc.version>2.6.0</springdoc.version>
         <!-- 7.4 is the last line supporting Java 17 / Logback 1.5 (Spring Boot 3.3). -->
         <logstash-encoder.version>7.4</logstash-encoder.version>
+        <spotless.version>2.43.0</spotless.version>
         <!-- Override Spring Boot 3.3's managed Testcontainers (1.19.x) with a newer
              line whose bundled docker-java negotiates the Docker Engine API version
              (recent daemons require a minimum >= 1.40). -->
@@ -147,6 +148,48 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+
+            <!-- Failsafe runs the integration tests (*IT) in the `verify` phase,
+                 keeping them separate from the fast unit tests Surefire runs in
+                 `test`. RealClusterIT (real node container) lives here. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- Spotless: a lightweight formatting gate (not a full reformat).
+                 Deliberately minimal — import order, no unused imports, trimmed
+                 trailing whitespace, newline at EOF — so it protects the shipped
+                 gateway code from drift without imposing a wholesale reformat.
+                 `check` binds to `verify` (CI runs `mvn verify`). -->
+            <plugin>
+                <groupId>com.diffplug.spotless</groupId>
+                <artifactId>spotless-maven-plugin</artifactId>
+                <version>${spotless.version}</version>
+                <configuration>
+                    <java>
+                        <importOrder/>
+                        <removeUnusedImports/>
+                        <trimTrailingWhitespace/>
+                        <endWithNewline/>
+                    </java>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

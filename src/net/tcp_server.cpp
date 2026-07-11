@@ -1,17 +1,19 @@
 #include "tcp_server.h"
-#include <iostream>
-#include <cstring>
-#include <thread>
-#include <unistd.h>
+
 #include <arpa/inet.h>
+#include <unistd.h>
+
+#include <cstring>
+#include <iostream>
+#include <thread>
+
 #include "framing.h"
 using namespace std;
-
 
 TCPServer::TCPServer(const string &host_, int port_, Node *node_)
     : host(host_), port(port_), node(node_) {}
 
-void TCPServer::start(){// init a tcp connection at given port associated with the node
+void TCPServer::start() {  // init a tcp connection at given port associated with the node
     int server_fd;
     struct sockaddr_in address;
     int opt = 1;
@@ -21,8 +23,7 @@ void TCPServer::start(){// init a tcp connection at given port associated with t
         exit(EXIT_FAILURE);
     }
 
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT,
-                   &opt, sizeof(opt))) {
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))) {
         perror("setsockopt");
         exit(EXIT_FAILURE);
     }
@@ -31,12 +32,12 @@ void TCPServer::start(){// init a tcp connection at given port associated with t
     address.sin_addr.s_addr = inet_addr(host.c_str());
     address.sin_port = htons(port);
 
-    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0){
+    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
         perror("bind failed");
         exit(EXIT_FAILURE);
     }
 
-    if (listen(server_fd, 10)<0){
+    if (listen(server_fd, 10) < 0) {
         perror("listen");
         exit(EXIT_FAILURE);
     }
@@ -45,10 +46,10 @@ void TCPServer::start(){// init a tcp connection at given port associated with t
     // ("TCP server listening on ..."); a second plain-text line here would be the
     // only non-JSON thing on stdout, so it's intentionally omitted.
 
-    while (true){
+    while (true) {
         int new_socket;
-        socklen_t addrlen=sizeof(address);
-        if ((new_socket=accept(server_fd, (struct sockaddr *)&address,&addrlen)) < 0) {
+        socklen_t addrlen = sizeof(address);
+        if ((new_socket = accept(server_fd, (struct sockaddr *)&address, &addrlen)) < 0) {
             perror("accept");
             continue;
         }
@@ -57,7 +58,7 @@ void TCPServer::start(){// init a tcp connection at given port associated with t
     }
 }
 
-void TCPServer::handleClient(int client_fd){// reads one framed request, dispatches, replies
+void TCPServer::handleClient(int client_fd) {  // reads one framed request, dispatches, replies
     string payload;
     if (!framing::recvFramed(client_fd, payload)) {
         close(client_fd);

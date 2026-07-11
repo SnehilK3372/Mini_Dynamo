@@ -1,7 +1,6 @@
 package com.minidynamo.gateway.cluster;
 
 import com.minidynamo.gateway.config.ClusterProperties;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;

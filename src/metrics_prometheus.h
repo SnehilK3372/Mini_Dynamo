@@ -21,7 +21,7 @@ class Gauge;
 }  // namespace prometheus
 
 class PrometheusMetrics : public Metrics {
-public:
+   public:
     // bind_address is host:port for the scrape server (e.g. "0.0.0.0:9101").
     // node_id is attached as a constant label so Grafana can slice by node even
     // before Prometheus adds its own `instance` label.
@@ -35,7 +35,7 @@ public:
     void incReadRepair() override;
     uint64_t readRepairCount() const override;
 
-private:
+   private:
     // Registry must outlive the Exposer (which holds a weak_ptr to it), so it is
     // declared first and the Exposer is torn down before it.
     std::shared_ptr<prometheus::Registry> registry_;
