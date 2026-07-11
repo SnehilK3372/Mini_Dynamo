@@ -123,8 +123,18 @@ Everything below ran on this box (Docker daemon up, JDK 21; Maven via the pinned
   (One pre-existing Tier-1B unit test, `JwtServiceTest.tamperedTokenIsRejected`, was flaky
   — it flipped an insignificant low-order bit of the base64url HS256 signature; fixed to
   tamper a high-order signature byte so it invalidates deterministically.)
-- **End-to-end on the full `docker compose` stack** (nodes + Postgres + gateway +
-  Prometheus + Grafana): confirmed after this commit — Prometheus scraping all four
-  targets, the provisioned Grafana dashboard populated, killing a node dropping its
-  `up` line and driving a read-repair spike on the next reads, and parseable JSON logs
-  from both services. See the Tier 1C session log / a follow-up note for the captured output.
+- **End-to-end on the full `docker compose` stack** (3 nodes + Postgres + gateway +
+  Prometheus + Grafana), all confirmed live:
+  - Auth → `PUT`/`GET` round-trips through the gateway (real `node2:1` clock).
+  - Node `/metrics` shows live series after traffic (`requests_total{op}`,
+    `quorum_total{op,outcome="success"}`); gateway `/actuator/prometheus` emits
+    `http_server_requests_seconds_bucket` (percentiles available).
+  - Prometheus reports **all four targets up** (`gateway`, `node1/2/3`).
+  - Grafana comes up with the **Prometheus datasource and the "Mini Dynamo" dashboard
+    provisioned** (no manual steps).
+  - Both services log **parseable JSON**; gateway lines carry `request_id`/`service`,
+    node lines carry `node_id`/`operation`/`key`/`outcome`.
+  - **Chaos:** stopping `node2` drops its `up` to 0 (per-node health panel moves) while
+    reads/writes stay available on the surviving replicas; after restart, reading the
+    keys written during the outage drives read repair — `minidynamo_read_repair_total`
+    on the coordinating node rose to 4 (the read-repair spike), and `up` returns to 1.

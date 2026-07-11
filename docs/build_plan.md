@@ -145,21 +145,21 @@ Do the four pieces in this order. Each depends on the previous one.
 
 ### 1C.1 — Metrics (Prometheus + Grafana)
 
-- [ ] Prometheus and Grafana in `docker-compose.yml`.
-- [ ] Prometheus scrape config: gateway's `/actuator/prometheus` and every C++ node's `/metrics`.
-- [ ] `prometheus-cpp` in the C++ nodes exposing: request rate (by op type), latency histograms (p50/p95/p99), quorum success/failure count, read-repair count, per-node up-count.
-- [ ] Grafana dashboard (defined as JSON in `deploy/grafana/`) covering:
-  - Request rate + latency percentiles (gateway view)
-  - Quorum success rate over time
-  - Read-repair events over time
-  - Per-node health
-- [ ] Grafana provisioned automatically at compose-up (datasource + dashboard).
+- [x] Prometheus and Grafana in `docker-compose.yml`.
+- [x] Prometheus scrape config: gateway's `/actuator/prometheus` and every C++ node's `/metrics`. *(`deploy/prometheus/prometheus.yml`.)*
+- [x] `prometheus-cpp` in the C++ nodes exposing: request rate (by op type), latency histograms (p50/p95/p99), quorum success/failure count, read-repair count, per-node up-count. *(Via the expanded `Metrics` seam + node-only `PrometheusMetrics`; `/metrics` on `METRICS_PORT`.)*
+- [x] Grafana dashboard (defined as JSON in `deploy/grafana/`) covering:
+  - [x] Request rate + latency percentiles (gateway view)
+  - [x] Quorum success rate over time
+  - [x] Read-repair events over time
+  - [x] Per-node health
+- [x] Grafana provisioned automatically at compose-up (datasource + dashboard).
 
 ### 1C.2 — Structured JSON logs
 
-- [ ] Java gateway: Logback in JSON encoder; every log line carries at minimum `service`, `request_id`, `level`, `msg`.
-- [ ] C++ nodes: spdlog in JSON pattern with the same field shape; include `node_id`, `key` (where meaningful), `operation`, `outcome`.
-- [ ] Logs go to stdout (Docker captures them). Do **not** wire ELK in this tier — deferred.
+- [x] Java gateway: Logback in JSON encoder; every log line carries at minimum `service`, `request_id`, `level`, `msg`. *(Logstash encoder + `RequestIdFilter` MDC.)*
+- [x] C++ nodes: spdlog in JSON pattern with the same field shape; include `node_id`, `key` (where meaningful), `operation`, `outcome`. *(`src/log.*` `jlog`; spdlog when present, stdout fallback otherwise.)*
+- [x] Logs go to stdout (Docker captures them). Do **not** wire ELK in this tier — deferred.
 
 **Definition of done:** Grafana loads with the dashboard populated at compose-up; killing a node visibly moves the "per-node health" panel and produces read-repair spikes on the next reads; `docker logs` output is parseable JSON on both services.
 
