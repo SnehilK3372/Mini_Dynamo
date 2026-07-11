@@ -32,6 +32,13 @@ management:
     health:
       probes:
         enabled: true
+  metrics:
+    distribution:
+      # Emit per-URI latency *buckets* for HTTP requests so Prometheus can derive
+      # p50/p95/p99 via histogram_quantile() — the gateway latency panel needs them
+      # (Micrometer publishes only sum/count without this).
+      percentiles-histogram:
+        http.server.requests: true
 
 # Where the C++ cluster lives and how patiently to talk to it.
 cluster:

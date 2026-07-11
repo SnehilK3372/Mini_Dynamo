@@ -1,0 +1,17 @@
+# Node image build context. The node Dockerfile builds only the C++ binary from
+# src/ + CMakeLists.txt (BUILD_TESTING=OFF), so keep everything else out of the
+# context — it keeps `docker build`/`docker compose build` fast and avoids
+# shipping the gateway's stale target/ or the .git history into the image.
+.git
+gateway
+deploy
+docs
+build
+CMakeFiles
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+tests
+*.o
+*.out
+kvstore

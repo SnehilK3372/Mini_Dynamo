@@ -10,9 +10,14 @@
 #include "net/tcp_server.h"
 #include "net/tcp_client.h"
 #include "message.h"
+#include "log.h"
+#include "metrics.h"
 #include "storage/in_memory_storage.h"
 #ifdef HAVE_ROCKSDB
 #include "storage/rocksdb_storage.h"
+#endif
+#ifdef HAVE_PROMETHEUS
+#include "metrics_prometheus.h"
 #endif
 
 using namespace std;
@@ -56,15 +61,30 @@ static unique_ptr<StorageEngine> makeStorage(const string &node_id){
     string engine = getenv_str("STORAGE_ENGINE", "rocksdb");
     if (engine != "memory"){
         string dir = getenv_str("DATA_DIR", "/data/" + node_id);
-        cout << "[" << node_id << "] storage: RocksDB at " << dir << "\n";
+        jlog::msg("info", "storage: RocksDB at " + dir);
         return make_unique<RocksDBStorageEngine>(dir);
     }
 #else
     string engine = getenv_str("STORAGE_ENGINE", "memory");
     (void)engine;
 #endif
-    cout << "[" << node_id << "] storage: in-memory (non-durable)\n";
+    jlog::msg("info", "storage: in-memory (non-durable)");
     return make_unique<InMemoryStorageEngine>();
+}
+
+// Chooses the metrics backend. When built with prometheus-cpp, each node stands
+// up its own scrape endpoint at http://0.0.0.0:<METRICS_PORT>/metrics (Prometheus
+// reaches it over the compose network by container name). Without it — e.g. a
+// memory-only test build — metrics are counted in process but not exposed.
+static unique_ptr<Metrics> makeMetrics(const string &node_id) {
+#ifdef HAVE_PROMETHEUS
+    string bind = "0.0.0.0:" + getenv_str("METRICS_PORT", "9100");
+    jlog::msg("info", "metrics: Prometheus exposer on " + bind + "/metrics");
+    return make_unique<PrometheusMetrics>(bind, node_id);
+#else
+    (void)node_id;
+    return make_unique<InMemoryMetrics>();
+#endif
 }
 
 
@@ -76,6 +96,10 @@ int main(){
     string host = getenv_str("HOST", "0.0.0.0");
     uint16_t port = stoi(getenv_str("NODE_PORT"));
 
+    // Bring up structured logging before anything else logs, so every line on
+    // stdout — startup included — is a JSON object carrying this node_id.
+    jlog::init(node_id);
+
     string bootstrap_ip = getenv_str("BOOTSTRAP_IP", "");
     uint16_t bootstrap_port = (uint16_t)stoi(getenv_str("BOOTSTRAP_PORT", "0"));
 
@@ -83,7 +107,7 @@ int main(){
 
     Router router;
     NodeInfo myInfo(node_id, node_id, port);
-    Node node(myInfo, &router, makeStorage(node_id));
+    Node node(myInfo, &router, makeStorage(node_id), makeMetrics(node_id));
 
     router.addPhysicalNode(myInfo);//prevents race condtion
 
@@ -93,15 +117,15 @@ int main(){
     });
     serverThread.detach();
 
-    cout << "[" << node_id << "] TCP Server started on " << host << ":" << port << "\n";
+    jlog::msg("info", "TCP server listening on " + host + ":" + to_string(port));
 
     if (isBootstrap){//logic for bootstrapping node
-        cout << "[" << node_id << "] Started as BOOTSTRAP node.\n";
+        jlog::msg("info", "started as BOOTSTRAP node");
 
     } else{
         // Join existing cluster
-        cout << "[" << node_id << "] contacting bootstrap at "
-             << bootstrap_ip << ":" << bootstrap_port << "\n";
+        jlog::msg("info", "contacting bootstrap at " + bootstrap_ip + ":" +
+                              to_string(bootstrap_port));
 
         TCPClient client;
 
@@ -116,14 +140,14 @@ int main(){
         string resp = client.sendAndReceiveFramed(bootstrap_ip, bootstrap_port, joinMsg.serialize());
 
         if (!resp.empty()){
-            cout << "[" << node_id << "] JOIN response received.\n";
-                        auto lines = split_lines_by_newline(resp);
+            auto lines = split_lines_by_newline(resp);
 
             if (!lines.empty() && lines[0] == "RING_UPDATE"){
                 if (lines.size() >= 2){
                     try{
                         int n = stoi(lines[1]);
-                        cout << "[" << node_id << "] Learning " << n << " existing nodes...\n";
+                        jlog::msg("info", "JOIN accepted; learning " + to_string(n) +
+                                              " existing node(s)");
 
                         for (int i = 0; i < n && 2 + i < (int)lines.size(); ++i){
                             // Server sends: NODE_ID|HOST|PORT
@@ -136,19 +160,19 @@ int main(){
 
                                 NodeInfo ni{nid, nhost, nport};
                                 router.addPhysicalNode(ni);
-                                cout << "[" << node_id << "] ... learned node " << nid << "\n";
+                                jlog::op("info", "join", nid, "learned");
                             }
                         }
                     } catch (const exception& e){
-                        cerr << "[" << node_id << "] Failed to parse RING_UPDATE: " << e.what() << "\n";
+                        jlog::msg("error", string("failed to parse RING_UPDATE: ") + e.what());
                     }
                 }
             } else{
-                cerr << "[" << node_id << "] Received malformed JOIN response: " << (lines.empty() ? resp : lines[0]) << "\n";
+                jlog::msg("error", "malformed JOIN response: " + (lines.empty() ? resp : lines[0]));
             }
 
         } else{
-            cerr << "[" << node_id << "] JOIN request FAILED (no response)." << endl;
+            jlog::msg("error", "JOIN request failed (no response)");
         }
     }
     while(true){

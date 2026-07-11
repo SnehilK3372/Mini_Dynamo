@@ -24,6 +24,8 @@
         <java.version>17</java.version>
         <jjwt.version>0.12.6</jjwt.version>
         <springdoc.version>2.6.0</springdoc.version>
+        <!-- 7.4 is the last line supporting Java 17 / Logback 1.5 (Spring Boot 3.3). -->
+        <logstash-encoder.version>7.4</logstash-encoder.version>
         <!-- Override Spring Boot 3.3's managed Testcontainers (1.19.x) with a newer
              line whose bundled docker-java negotiates the Docker Engine API version
              (recent daemons require a minimum >= 1.40). -->
@@ -101,6 +103,15 @@
             <groupId>org.springdoc</groupId>
             <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
             <version>${springdoc.version}</version>
+        </dependency>
+
+        <!-- Structured JSON logging. Spring Boot 3.3 predates the built-in
+             structured-logging support (3.4+), so we drive Logback with the
+             Logstash JSON encoder to emit one JSON object per log line. -->
+        <dependency>
+            <groupId>net.logstash.logback</groupId>
+            <artifactId>logstash-logback-encoder</artifactId>
+            <version>${logstash-encoder.version}</version>
         </dependency>
 
         <!-- Testing: unit (JUnit5 + Mockito, bundled), security test, Testcontainers, REST Assured. -->

@@ -41,9 +41,14 @@ class JwtServiceTest {
     void tamperedTokenIsRejected() {
         JwtService svc = service(30);
         String token = svc.issue("admin", List.of("ADMIN"));
-        // Flip the last character of the signature.
-        char last = token.charAt(token.length() - 1);
-        String tampered = token.substring(0, token.length() - 1) + (last == 'A' ? 'B' : 'A');
+        // Flip the FIRST character of the signature segment. The last base64url
+        // char of a 256-bit HS256 signature only carries 4 significant bits (43
+        // chars * 6 = 258 bits > 256), so flipping it can leave the decoded bytes
+        // unchanged and the token still valid; the first char always encodes
+        // high-order bits, so mutating it is a guaranteed, deterministic tamper.
+        int sig = token.lastIndexOf('.') + 1;
+        char c = token.charAt(sig);
+        String tampered = token.substring(0, sig) + (c == 'A' ? 'B' : 'A') + token.substring(sig + 1);
         assertThatThrownBy(() -> svc.parse(tampered)).isInstanceOf(JwtException.class);
     }
 

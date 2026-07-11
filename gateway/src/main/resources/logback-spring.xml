@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Structured JSON logging for the gateway. Every log line is one JSON object on
+  stdout (Docker captures it), carrying at least: service, request_id, level, msg.
+
+  - service: a constant custom field.
+  - request_id: pulled from MDC (set per request by RequestIdFilter); present on
+    any log emitted while handling a request.
+  - level / msg: the log level and message (message renamed from Logstash's
+    default "message" to "msg" to match the field shape the C++ nodes emit).
+-->
+<configuration>
+    <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <fieldNames>
+                <timestamp>ts</timestamp>
+                <message>msg</message>
+                <!-- Drop noise we don't need in the field shape. -->
+                <version>[ignore]</version>
+                <levelValue>[ignore]</levelValue>
+            </fieldNames>
+            <customFields>{"service":"mini-dynamo-gateway"}</customFields>
+        </encoder>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="JSON"/>
+    </root>
+</configuration>

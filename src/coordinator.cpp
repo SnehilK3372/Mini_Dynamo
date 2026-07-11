@@ -94,7 +94,7 @@ PutResult Coordinator::coordinatePut(const string &key, const string &value,
     // fan-out, never-regress replication — is identical, so both go through
     // writeQuorum.
     VersionedValue vv{value, bumpedClock(key, context), /*deleted=*/false};
-    return writeQuorum(key, vv, N, W);
+    return writeQuorum(key, vv, N, W, Op::Put);
 }
 
 // A delete is a versioned tombstone written by quorum, not a local erase: it
@@ -104,12 +104,16 @@ PutResult Coordinator::coordinatePut(const string &key, const string &value,
 PutResult Coordinator::coordinateDelete(const string &key, const VectorClock &context, int N,
                                         int W) {
     VersionedValue tombstone{/*data=*/"", bumpedClock(key, context), /*deleted=*/true};
-    return writeQuorum(key, tombstone, N, W);
+    return writeQuorum(key, tombstone, N, W, Op::Delete);
 }
 
-PutResult Coordinator::writeQuorum(const string &key, const VersionedValue &vv, int N, int W) {
+PutResult Coordinator::writeQuorum(const string &key, const VersionedValue &vv, int N, int W,
+                                   Op op) {
     auto owners = router_->findOwners(key, N);
-    if (owners.empty()) return {false, {}, "no_nodes_in_ring"};
+    if (owners.empty()) {
+        metrics_->incQuorumFailure(op);
+        return {false, {}, "no_nodes_in_ring"};
+    }
 
     const VectorClock &newClock = vv.clock;
     const string serialized = vv.serialize();
@@ -157,7 +161,11 @@ PutResult Coordinator::writeQuorum(const string &key, const VersionedValue &vv, 
         finalAcks = q->acks;
     }
 
-    if (finalAcks >= W) return {true, newClock, ""};
+    if (finalAcks >= W) {
+        metrics_->incQuorumSuccess(op);
+        return {true, newClock, ""};
+    }
+    metrics_->incQuorumFailure(op);
     return {false, {}, "quorum_not_met"};
 }
 
@@ -229,7 +237,10 @@ void Coordinator::repairAsync(const NodeInfo &peer, const string &key,
 
 GetResult Coordinator::coordinateGet(const string &key, int N, int R) {
     auto owners = router_->findOwners(key, N);
-    if (owners.empty()) return {GetResult::Status::ERROR, {}, "no_nodes_in_ring"};
+    if (owners.empty()) {
+        metrics_->incQuorumFailure(Op::Get);
+        return {GetResult::Status::ERROR, {}, "no_nodes_in_ring"};
+    }
 
     auto q = make_shared<ReadQuorum>();
     vector<NodeInfo> remotes;
@@ -278,8 +289,12 @@ GetResult Coordinator::coordinateGet(const string &key, int N, int R) {
     }
 
     if (static_cast<int>(responses.size()) < R) {
+        metrics_->incQuorumFailure(Op::Get);
         return {GetResult::Status::ERROR, {}, "quorum_not_met"};
     }
+    // R responses gathered: the read quorum was met. Whether the key exists,
+    // is a tombstone, or has siblings is a data outcome, not a quorum outcome.
+    metrics_->incQuorumSuccess(Op::Get);
 
     auto maximal = maximalVersions(responses);
     if (maximal.empty()) {

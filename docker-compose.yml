@@ -6,9 +6,11 @@ services:
     environment:
       NODE_ID: node1
       NODE_PORT: 5001
+      METRICS_PORT: 9100
       # node1 is bootstrap, no BOOTSTRAP_IP
     ports:
       - "5001:5001"
+      - "9101:9100"   # Prometheus /metrics (host-side; Prometheus scrapes node1:9100 internally)
     networks:
       - dhtnet
     restart: unless-stopped
@@ -20,10 +22,12 @@ services:
     environment:
       NODE_ID: node2
       NODE_PORT: 5002
+      METRICS_PORT: 9100
       BOOTSTRAP_IP: node1
       BOOTSTRAP_PORT: 5001
     ports:
       - "5002:5002"
+      - "9102:9100"
     networks:
       - dhtnet
     depends_on:
@@ -89,9 +93,49 @@ services:
         condition: service_started
     restart: unless-stopped
 
+  # Prometheus scrapes the gateway (/actuator/prometheus) and every node
+  # (/metrics) over the compose network; config is mounted from deploy/.
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    networks:
+      - dhtnet
+    depends_on:
+      - node1
+      - gateway
+    restart: unless-stopped
+
+  # Grafana with its datasource + dashboard provisioned from deploy/grafana, so
+  # the "Mini Dynamo" dashboard is populated the moment the stack is up.
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    networks:
+      - dhtnet
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
 networks:
   dhtnet:
     driver: bridge
 
 volumes:
   pgdata:
+  grafana-data:

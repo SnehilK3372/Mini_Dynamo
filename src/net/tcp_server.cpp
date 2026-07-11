@@ -41,7 +41,9 @@ void TCPServer::start(){// init a tcp connection at given port associated with t
         exit(EXIT_FAILURE);
     }
 
-    cout<< "[SERVER] Listening on "<<host<<":"<<port<<endl;
+    // The listening banner is emitted as a structured jlog line from main.cpp
+    // ("TCP server listening on ..."); a second plain-text line here would be the
+    // only non-JSON thing on stdout, so it's intentionally omitted.
 
     while (true){
         int new_socket;

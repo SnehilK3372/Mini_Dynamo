@@ -62,7 +62,10 @@ public class KvService {
         WriteResult res = cluster.put(key, value, body.clock(),
                 orDefault(n, d.n()), orDefault(w, d.w()), orDefault(r, d.r()));
         return switch (res.status()) {
-            case OK -> new WriteResponse(res.clock());
+            case OK -> {
+                log.info("op=put key={} outcome=ok", key);
+                yield new WriteResponse(res.clock());
+            }
             case QUORUM_FAILED -> throw new QuorumNotMetException();
             case ERROR -> throw new ClusterProtocolException(res.error());
         };
@@ -72,7 +75,10 @@ public class KvService {
         Quorum d = defaults();
         ReadResult res = cluster.get(key, orDefault(n, d.n()), orDefault(r, d.r()));
         return switch (res.status()) {
-            case OK -> toDto(res.values().get(0));
+            case OK -> {
+                log.info("op=get key={} outcome=ok", key);
+                yield toDto(res.values().get(0));
+            }
             case SIBLINGS -> throw new SiblingsConflictException(res.values().stream()
                     .map(KvService::toDto).toList());
             case NOT_FOUND -> throw new KeyNotFoundException(key);
@@ -91,6 +97,7 @@ public class KvService {
         return switch (res.status()) {
             case OK -> {
                 audit(actor, key, before);
+                log.info("op=delete key={} outcome=ok actor={}", key, actor);
                 yield new WriteResponse(res.clock());
             }
             case QUORUM_FAILED -> throw new QuorumNotMetException();

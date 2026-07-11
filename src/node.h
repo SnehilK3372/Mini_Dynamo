@@ -21,11 +21,13 @@ class Router;
 // this class has no networking loop of its own.
 class Node {
 public:
-    // Storage is injected (RocksDB in production, in-memory for a memory-only
-    // build/tests). Node builds its own Metrics and TCP-backed ReplicaClient and
-    // wires up the Coordinator over them.
+    // Storage and Metrics are injected: RocksDB + PrometheusMetrics in production,
+    // in-memory versions for a memory-only build/tests. Passing a null Metrics
+    // selects InMemoryMetrics, so existing call sites (and tests) keep working
+    // without a Prometheus dependency. Node builds its own TCP-backed
+    // ReplicaClient and wires up the Coordinator over these.
     Node(const NodeInfo &info, Router *router, unique_ptr<StorageEngine> storage,
-         QuorumConfig cfg = {});
+         unique_ptr<Metrics> metrics = nullptr, QuorumConfig cfg = {});
 
     // Handle one framed request payload; write a framed response to client_fd.
     void handleRequest(const string &payload, int client_fd);

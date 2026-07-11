@@ -88,8 +88,9 @@ private:
 
     // The shared W-quorum write fan-out used by both put and delete: fans the
     // already-built VersionedValue out to the N owners and returns OK once W
-    // acknowledge within the deadline, else quorum_not_met.
-    PutResult writeQuorum(const std::string &key, const VersionedValue &vv, int N, int W);
+    // acknowledge within the deadline, else quorum_not_met. `op` only selects the
+    // metric label (put vs delete) — the fan-out logic is identical.
+    PutResult writeQuorum(const std::string &key, const VersionedValue &vv, int N, int W, Op op);
 
     // Fire-and-forget: push `value` to `peer` (or to local storage if peer is
     // self) on a background thread, bumping the read-repair metric. Never blocks

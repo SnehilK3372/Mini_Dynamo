@@ -1,0 +1,15 @@
+# Tells Grafana to load every dashboard JSON under /var/lib/grafana/dashboards
+# (mounted from deploy/grafana/dashboards) at startup. This is why the dashboard
+# lives as JSON in the repo — it is provisioned as code, not hand-built in the UI.
+apiVersion: 1
+
+providers:
+  - name: mini-dynamo
+    orgId: 1
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false
