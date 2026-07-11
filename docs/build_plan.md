@@ -51,33 +51,33 @@ Do the four pieces in this order. Each depends on the previous one.
 
 ### 1A.1 — Durable per-node storage (RocksDB)
 
-- [ ] Add RocksDB dependency to the build (CMake) and the Dockerfile.
-- [ ] Implement `RocksDBStorageEngine` behind the Tier 0 interface. Each node owns its own RocksDB directory on its own disk — shared-nothing.
-- [ ] Wire nodes to use RocksDB by default (env-var toggle keeps in-memory available for tests).
-- [ ] GoogleTest: values survive a node restart; two nodes' storage remain independent.
+- [x] Add RocksDB dependency to the build (CMake) and the Dockerfile.
+- [x] Implement `RocksDBStorageEngine` behind the Tier 0 interface. Each node owns its own RocksDB directory on its own disk — shared-nothing.
+- [x] Wire nodes to use RocksDB by default (`STORAGE_ENGINE` env toggle keeps in-memory available for tests).
+- [x] GoogleTest: values survive a node restart; two nodes' storage remain independent. *(Written; run in Docker/CI — no RocksDB on the dev machine.)*
 
 ### 1A.2 — Real write quorum (W) and read quorum (R)
 
-- [ ] Add `N`, `W`, `R` as configurable per-request parameters (defaults: `N=3`, `W=2`, `R=2`). Extend the wire protocol.
-- [ ] Replace fire-and-forget `REPLICATE` with a request/response that returns an ack. Coordinator waits for `W` acks (with a timeout) before returning `OK` to the client; on timeout, return an error status the client can retry.
-- [ ] On `GET`, coordinator queries the `N` replicas in parallel and waits for `R` responses before answering.
-- [ ] GoogleTest: `W` met returns OK; `W` not met returns error; `R` met returns; behavior with a downed replica matches spec.
+- [x] Add `N`, `W`, `R` as configurable per-request parameters (defaults: `N=3`, `W=2`, `R=2`). Extended the wire protocol (now length-prefixed framed; values base64).
+- [x] Replace fire-and-forget `REPLICATE` with a request/response that returns an ack. Coordinator waits for `W` acks (with a timeout) before returning `OK`; on timeout, returns `quorum_not_met` for the client to retry.
+- [x] On `GET`, coordinator queries the `N` replicas in parallel and waits for `R` responses before answering.
+- [x] GoogleTest: `W` met returns OK; `W` not met returns error; a slow ack past the deadline doesn't count and doesn't hang; `R` met returns; downed-replica behavior. *(Run green locally.)*
 
 ### 1A.3 — Versioned values with vector clocks
 
-- [ ] Define a `VectorClock` type (`map<node_id, counter>`), with a `compare(a, b)` returning `EQUAL | A_DOMINATES | B_DOMINATES | CONCURRENT`. This function is the intellectual heart — make it clean and well-tested.
-- [ ] Extend the stored value type to `VersionedValue { data, VectorClock clock }`. Update the wire protocol to carry the clock.
-- [ ] On PUT: coordinator increments its own entry in the clock (starting from the clock the client sent, if any) and writes `VersionedValue` to replicas.
-- [ ] On GET: replicas return their `VersionedValue`; the coordinator compares clocks. If one version dominates all others, return it. If any two are `CONCURRENT`, return all conflicting versions as **siblings** (extend the response format).
-- [ ] GoogleTest — cover both cases explicitly:
-  - [ ] Dominance: sequential writes converge to one winner
-  - [ ] Concurrency: writes with clocks that neither dominate produce siblings on read
+- [x] Define a `VectorClock` type (`map<node_id, counter>`), with a `compare(a, b)` returning `EQUAL | A_DOMINATES | B_DOMINATES | CONCURRENT`. This function is the intellectual heart — make it clean and well-tested.
+- [x] Extend the stored value type to `VersionedValue { data, VectorClock clock }`. Updated the wire protocol to carry the clock.
+- [x] On PUT: coordinator bumps its own entry (above `max(client context, local stored)`, so a blind write is never born already-dominated) and writes `VersionedValue` to replicas.
+- [x] On GET: replicas return their `VersionedValue`; the coordinator compares clocks. If one version dominates, return it. If two are `CONCURRENT`, return all conflicting versions as **siblings**.
+- [x] GoogleTest — cover both cases explicitly:
+  - [x] Dominance: sequential writes converge to one winner
+  - [x] Concurrency: writes with clocks that neither dominate produce siblings on read
 
 ### 1A.4 — Read repair
 
-- [ ] After answering a `GET`, coordinator asynchronously pushes the dominant `VersionedValue` to any replica whose response was strictly dominated (a stale version). Never blocks the read.
-- [ ] GoogleTest: stale replica converges to the current version after a read.
-- [ ] Add a `read_repair_count` metric-style counter now (Prometheus wiring comes in the observability tier — just make sure it's exposed by an interface).
+- [x] After answering a `GET`, coordinator asynchronously pushes the dominant `VersionedValue` to any replica whose response was strictly dominated (a stale version). Never blocks the read.
+- [x] GoogleTest: stale replica converges to the current version after a read (synchronized via the fake's `waitForWrites`, no sleeps).
+- [x] Add a `read_repair_count` counter now, behind a `Metrics` interface (Prometheus wiring comes in the observability tier).
 
 **Definition of done for Tier 1A:** all four sub-tiers implemented, all listed tests passing, `docker-compose up` still runs a healthy cluster, a manual scenario proves the story end-to-end: kill a replica → write with `W=2` succeeds → restart → read triggers repair → replica converges.
 

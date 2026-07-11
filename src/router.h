@@ -6,7 +6,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
-#include "node.h"
+#include "node_info.h"
 
 using namespace std;
 

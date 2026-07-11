@@ -11,6 +11,9 @@
 #include "net/tcp_client.h"
 #include "message.h"
 #include "storage/in_memory_storage.h"
+#ifdef HAVE_ROCKSDB
+#include "storage/rocksdb_storage.h"
+#endif
 
 using namespace std;
 
@@ -44,13 +47,27 @@ static vector<string> split_string(const string &s, char delim){//msg splitter
     return out;
 }
 
+// Chooses the per-node storage engine. RocksDB (durable, one instance per node's
+// own directory — shared-nothing) is the default when the binary was built with
+// it; STORAGE_ENGINE=memory forces the volatile map (used by tests and quick
+// demos). Without RocksDB compiled in, memory is the only option.
+static unique_ptr<StorageEngine> makeStorage(const string &node_id){
+#ifdef HAVE_ROCKSDB
+    string engine = getenv_str("STORAGE_ENGINE", "rocksdb");
+    if (engine != "memory"){
+        string dir = getenv_str("DATA_DIR", "/data/" + node_id);
+        cout << "[" << node_id << "] storage: RocksDB at " << dir << "\n";
+        return make_unique<RocksDBStorageEngine>(dir);
+    }
+#else
+    string engine = getenv_str("STORAGE_ENGINE", "memory");
+    (void)engine;
+#endif
+    cout << "[" << node_id << "] storage: in-memory (non-durable)\n";
+    return make_unique<InMemoryStorageEngine>();
+}
 
 
-
-
-//Instantiates the Router and Node objects
-//inserts virtual nodes into the hash ring
-//boots the node with start()
 int main(){
     cout.setf(ios::unitbuf);
 
@@ -66,8 +83,7 @@ int main(){
 
     Router router;
     NodeInfo myInfo(node_id, node_id, port);
-    // In-memory engine for now; Tier 1A swaps in RocksDB behind StorageEngine.
-    Node node(myInfo, &router, make_unique<InMemoryStorageEngine>());
+    Node node(myInfo, &router, makeStorage(node_id));
 
     router.addPhysicalNode(myInfo);//prevents race condtion
 
@@ -80,12 +96,11 @@ int main(){
     cout << "[" << node_id << "] TCP Server started on " << host << ":" << port << "\n";
 
     if (isBootstrap){//logic for bootstrapping node
-        //router.addPhysicalNode(myInfo);
         cout << "[" << node_id << "] Started as BOOTSTRAP node.\n";
 
     } else{
         // Join existing cluster
-        cout << "[" << node_id << "] contacting bootstrap at " 
+        cout << "[" << node_id << "] contacting bootstrap at "
              << bootstrap_ip << ":" << bootstrap_port << "\n";
 
         TCPClient client;
@@ -98,27 +113,27 @@ int main(){
         joinMsg.port = myInfo.port;
         joinMsg.value = to_string(myInfo.port);
 
-        string resp = client.sendAndReceive(bootstrap_ip, bootstrap_port, joinMsg.serialize());
+        string resp = client.sendAndReceiveFramed(bootstrap_ip, bootstrap_port, joinMsg.serialize());
 
         if (!resp.empty()){
             cout << "[" << node_id << "] JOIN response received.\n";
                         auto lines = split_lines_by_newline(resp);
-            
+
             if (!lines.empty() && lines[0] == "RING_UPDATE"){
                 if (lines.size() >= 2){
                     try{
                         int n = stoi(lines[1]);
                         cout << "[" << node_id << "] Learning " << n << " existing nodes...\n";
-                        
+
                         for (int i = 0; i < n && 2 + i < (int)lines.size(); ++i){
                             // Server sends: NODE_ID|HOST|PORT
                             auto parts = split_string(lines[2 + i], '|');
-                            
+
                             if (parts.size() == 3){
                                 string nid = parts[0];
                                 string nhost = parts[1];
                                 uint16_t nport = (uint16_t)stoi(parts[2]);
-                                
+
                                 NodeInfo ni{nid, nhost, nport};
                                 router.addPhysicalNode(ni);
                                 cout << "[" << node_id << "] ... learned node " << nid << "\n";
@@ -131,7 +146,7 @@ int main(){
             } else{
                 cerr << "[" << node_id << "] Received malformed JOIN response: " << (lines.empty() ? resp : lines[0]) << "\n";
             }
-            
+
         } else{
             cerr << "[" << node_id << "] JOIN request FAILED (no response)." << endl;
         }

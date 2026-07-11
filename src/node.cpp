@@ -1,188 +1,203 @@
 #include "node.h"
 
-#include <sys/socket.h>
-
 #include <iostream>
 #include <sstream>
 #include <utility>
 #include <vector>
 
+#include "base64.h"
 #include "message.h"
+#include "net/framing.h"
 #include "net/tcp_client.h"
+#include "net/tcp_replica_client.h"
 #include "router.h"
 
 using namespace std;
 
-Node::Node(const NodeInfo &info_, Router *router_, unique_ptr<StorageEngine> storage_)
-    : info(info_), router(router_), storage(move(storage_)){}
-
-// How many distinct physical nodes should hold each key. Becomes the
-// per-request N once tunable quorum lands in Tier 1A.
-const int REPLICATION_FACTOR = 3;
-
-string Node::handlePut(const string &key, const string &value){// helper for handling "PUT"
-    cout<<"["<<info.node_id<<"] handlePut: Storing key "<<key<<" locally.\n";
-    storage->put(key, value);
-
-    auto all_owners = router->findOwners(key, REPLICATION_FACTOR);
-
-    // Fire-and-forget replication: we do NOT wait for replica acks, so "OK"
-    // only guarantees the local write. Real W-quorum acks are Tier 1A work.
-    for (const auto &owner : all_owners){
-        if (owner.node_id == this->info.node_id){
-            continue;
+namespace {
+// Split on '|' preserving empty fields (a trailing empty clock must survive).
+vector<string> splitAll(const string &s, char delim) {
+    vector<string> out;
+    size_t start = 0;
+    while (true) {
+        size_t p = s.find(delim, start);
+        if (p == string::npos) {
+            out.push_back(s.substr(start));
+            break;
         }
+        out.push_back(s.substr(start, p - start));
+        start = p + 1;
+    }
+    return out;
+}
 
-        cout<<"["<<info.node_id<<"] handlePut: Replicating key "<<key
-            <<" to "<<owner.node_id<<"\n";
+int toInt(const vector<string> &f, size_t i, int def = 0) {
+    if (i >= f.size() || f[i].empty()) return def;
+    try {
+        return stoi(f[i]);
+    } catch (...) {
+        return def;
+    }
+}
 
-        Message replicateMsg;
-        replicateMsg.type = "REPLICATE";
-        replicateMsg.key = key;
-        replicateMsg.value = value;
-        replicateMsg.origin = this->info.node_id;
+string field(const vector<string> &f, size_t i) { return i < f.size() ? f[i] : string(); }
 
+void reply(int fd, const string &payload) { framing::sendFramed(fd, payload); }
+}  // namespace
+
+Node::Node(const NodeInfo &info_, Router *router, unique_ptr<StorageEngine> storage,
+           QuorumConfig cfg)
+    : info(info_),
+      router_(router),
+      storage_(move(storage)),
+      metrics_(make_unique<InMemoryMetrics>()),
+      replicas_(make_unique<TcpReplicaClient>(info_.node_id)),
+      cfg_(cfg) {
+    coordinator_ = make_unique<Coordinator>(info, router_, storage_.get(), replicas_.get(),
+                                            metrics_.get(), cfg_);
+}
+
+void Node::handleRequest(const string &payload, int client_fd) {
+    auto f = splitAll(payload, '|');
+    if (f.empty() || f[0].empty()) return;
+    const string &type = f[0];
+
+    if (type == "PUT") {
+        handlePut(f, payload, client_fd);
+    } else if (type == "GET") {
+        handleGet(f, client_fd);
+    } else if (type == "REPLICATE") {
+        handleReplicate(f, client_fd);
+    } else if (type == "READ") {
+        handleReadReplica(f, client_fd);
+    } else if (type == "JOIN") {
+        handleJoin(payload, client_fd);
+    } else {
+        reply(client_fd, "RESPONSE|ERROR|unknown_command");
+    }
+}
+
+// PUT|<key>|<b64value>|<origin>|<N>|<W>|<R>|<clock>
+void Node::handlePut(const vector<string> &f, const string &rawPayload, int client_fd) {
+    const string key = field(f, 1);
+    auto owners = router_->findOwners(key, 1);
+    if (owners.empty()) {
+        reply(client_fd, "RESPONSE|ERROR|no_nodes_in_ring");
+        return;
+    }
+    const NodeInfo &primary = owners[0];
+
+    // A write is coordinated by the key's primary owner (its deterministic
+    // clock-incrementer). If we are not it, forward the request verbatim and
+    // relay the reply.
+    if (primary.node_id != info.node_id) {
         TCPClient client;
-        client.send(owner.host, owner.port, replicateMsg.serialize());
-    }
-
-    return "OK";
-}
-
-void Node::handleReplicate(const string &key, const string &value){
-    cout<<"["<<info.node_id<<"] handleReplicate: Storing replicated key "<<key<<"\n";
-    storage->put(key, value);
-}
-
-optional<string> Node::handleGet(const string &key){
-    return storage->get(key);
-}
-
-void Node::onMessageReceived(const Message &msg, int client_fd){
-
-    cout<<"["<<info.node_id<<"] Received message type="<<msg.type<<"\n";
-
-    // --- PUT HANDLER (with Coordinator Logic) ---
-    if (msg.type == "PUT"){
-        auto owners = router->findOwners(msg.key, 1);
-        if (owners.empty()){
-            string resp = "RESPONSE|ERROR|no_nodes_in_ring\n";
-            send(client_fd, resp.c_str(), resp.size(), 0);
-            return;
-        }
-
-        NodeInfo primaryOwner = owners[0];
-
-        if (primaryOwner.node_id == this->info.node_id){
-
-            cout<<"["<<info.node_id<<"] PUT key="<<msg.key<<" (local)\n";
-            string res = handlePut(msg.key, msg.value);
-            string resp = "RESPONSE|" + res + "\n";
-            send(client_fd, resp.c_str(), resp.size(), 0);
-        } else{
-            cout<<"["<<info.node_id<<"] PUT key="<<msg.key
-                     <<" (forwarding to "<<primaryOwner.node_id<<")\n";
-            Message putMsg = msg;
-            TCPClient tcpClient;
-            string rawResponse = tcpClient.sendAndReceive(
-                primaryOwner.host, primaryOwner.port, putMsg.serialize()
-            );
-
-            if (rawResponse.empty()){
-                string resp = "RESPONSE|ERROR|forward_failed\n";
-                send(client_fd, resp.c_str(), resp.size(), 0);
-            } else{
-                // Relay the owner's response
-                send(client_fd, rawResponse.c_str(), rawResponse.size(), 0);
-            }
-        }
-    }
-
-
-else if (msg.type == "GET"){
-    auto owners = router->findOwners(msg.key, REPLICATION_FACTOR);// full list of potential owners
-
-    if (owners.empty()){
-        string resp = "RESPONSE|NOTFOUND|no_nodes_in_ring\n";
-        send(client_fd, resp.c_str(), resp.size(), 0);
+        string resp = client.sendAndReceiveFramed(primary.host, primary.port, rawPayload,
+                                                  static_cast<int>(cfg_.timeout.count()) * 2);
+        reply(client_fd, resp.empty() ? "RESPONSE|ERROR|forward_failed" : resp);
         return;
     }
 
-    bool found = false;
-    for (const auto &owner : owners){
+    const string value = base64::decode(field(f, 2));
+    VectorClock context = VectorClock::parse(field(f, 7));
+    int N = effN(toInt(f, 4));
+    int W = effW(toInt(f, 5));
 
-        if (owner.node_id == this->info.node_id){
-            cout<<"["<<info.node_id<<"] GET key="<<msg.key<<" (checking local)\n";
-            auto val = handleGet(msg.key);
-
-            if (val){
-                string resp = "RESPONSE|OK|" + *val + "\n";
-                send(client_fd, resp.c_str(), resp.size(), 0);
-                found = true;
-                break;
-            }
-
-        }
-        else{
-            cout<<"["<<info.node_id<<"] GET key="<<msg.key
-                <<" (forwarding to "<<owner.node_id<<")\n";
-
-            Message getMsg;
-            getMsg.type = "GET";
-            getMsg.key = msg.key;
-            getMsg.origin = this->info.node_id;
-
-            TCPClient tcpClient;
-            string rawResponse = tcpClient.sendAndReceive(
-                owner.host, owner.port, getMsg.serialize()
-            );
-            if (!rawResponse.empty()){
-                if (rawResponse.find("NOTFOUND") == string::npos){
-                    send(client_fd, rawResponse.c_str(), rawResponse.size(), 0);
-                    found = true;
-                    break;
-                }
-
-            }
-        }
-    }
-
-    if (!found){
-        string resp = "RESPONSE|NOTFOUND\n";
-        send(client_fd, resp.c_str(), resp.size(), 0);
+    PutResult pr = coordinator_->coordinatePut(key, value, context, N, W);
+    if (pr.ok) {
+        reply(client_fd, "RESPONSE|OK|" + pr.clock.serialize());
+    } else {
+        reply(client_fd, "RESPONSE|ERROR|" + pr.error);
     }
 }
-    else if (msg.type == "REPLICATE"){
-        handleReplicate(msg.key, msg.value);
-        string resp = "RESPONSE|OK";
-        send(client_fd, resp.c_str(), resp.size(), 0);
+
+// GET|<key>|<origin>|<N>|<R>   (coordinated by whichever node receives it)
+void Node::handleGet(const vector<string> &f, int client_fd) {
+    const string key = field(f, 1);
+    int N = effN(toInt(f, 3));
+    int R = effR(toInt(f, 4));
+
+    GetResult gr = coordinator_->coordinateGet(key, N, R);
+    switch (gr.status) {
+        case GetResult::Status::OK: {
+            const auto &v = gr.values.front();
+            reply(client_fd,
+                  "RESPONSE|OK|" + base64::encode(v.data) + "|" + v.clock.serialize());
+            break;
+        }
+        case GetResult::Status::SIBLINGS: {
+            ostringstream oss;
+            oss << "RESPONSE|SIBLINGS|" << gr.values.size();
+            for (const auto &v : gr.values) {
+                oss << "|" << base64::encode(v.data) << "|" << v.clock.serialize();
+            }
+            reply(client_fd, oss.str());
+            break;
+        }
+        case GetResult::Status::NOTFOUND:
+            reply(client_fd, "RESPONSE|NOTFOUND");
+            break;
+        case GetResult::Status::ERROR:
+            reply(client_fd, "RESPONSE|ERROR|" + gr.error);
+            break;
     }
-    else if (msg.type == "JOIN"){
-        if (msg.key.empty() || msg.host.empty() || msg.port == 0){
-            cerr<<"["<<info.node_id<<"] Received MALFORMED JOIN"
-                <<" key="<<msg.key<<" host="<<msg.host<<" port="<<msg.port<<"\n";
+}
+
+// REPLICATE|<key>|<b64value>|<origin>|<clock>  (coordinator -> replica write)
+void Node::handleReplicate(const vector<string> &f, int client_fd) {
+    const string key = field(f, 1);
+    VersionedValue incoming{base64::decode(field(f, 2)), VectorClock::parse(field(f, 4))};
+
+    // Never regress: if we already hold a version that strictly dominates the
+    // incoming one, this is a stale/duplicate replicate — acknowledge it (our
+    // copy is at least as new) but keep ours. Otherwise store the incoming
+    // version. Concurrent versions across *different* replicas are surfaced as
+    // siblings at read time; a single replica keeps one value (full per-replica
+    // sibling storage is deferred with anti-entropy).
+    auto stored = storage_->get(key);
+    if (stored) {
+        VersionedValue local = VersionedValue::deserialize(*stored);
+        if (VectorClock::compare(local.clock, incoming.clock) ==
+            VectorClock::Ordering::A_DOMINATES) {
+            reply(client_fd, "RESPONSE|OK");
             return;
         }
-
-        NodeInfo ji{msg.key, msg.host, (uint16_t)msg.port};
-        cout<<"["<<info.node_id<<"] JOIN from "<<ji.node_id<<" at "<<ji.host<<":"<<ji.port<<"\n";
-
-        //gets the current ring *before* adding the new node
-        vector<NodeInfo> current_ring = router->getAllPhysicalNodes();
-
-        router->addPhysicalNode(ji);
-        ostringstream oss_resp;
-        oss_resp<<"RING_UPDATE\n";
-        oss_resp<<current_ring.size()<<"\n";
-        for (const auto &n : current_ring){
-            oss_resp<<n.node_id<<"|"<<n.host<<"|"<<n.port<<"\n";
-        }
-        string resp = oss_resp.str();
-        send(client_fd, resp.c_str(), resp.size(), 0);
     }
-    // ---
-    else{
-        string resp = "RESPONSE|ERR_UNKNOWN_COMMAND";
-        send(client_fd, resp.c_str(), resp.size(), 0);
+    storage_->put(key, incoming.serialize());
+    reply(client_fd, "RESPONSE|OK");
+}
+
+// READ|<key>|<origin>  (coordinator -> replica read)
+void Node::handleReadReplica(const vector<string> &f, int client_fd) {
+    const string key = field(f, 1);
+    auto stored = storage_->get(key);
+    if (!stored) {
+        reply(client_fd, "VAL|NOTFOUND");
+        return;
     }
+    VersionedValue v = VersionedValue::deserialize(*stored);
+    reply(client_fd, "VAL|" + base64::encode(v.data) + "|" + v.clock.serialize());
+}
+
+// JOIN|<id>|<port>|<origin>|<host>|<port>  → reply with the current ring.
+void Node::handleJoin(const string &payload, int client_fd) {
+    Message msg = Message::deserialize(payload);
+    if (msg.key.empty() || msg.host.empty() || msg.port == 0) {
+        cerr << "[" << info.node_id << "] malformed JOIN\n";
+        return;
+    }
+    NodeInfo joiner{msg.key, msg.host, static_cast<uint16_t>(msg.port)};
+    cout << "[" << info.node_id << "] JOIN from " << joiner.node_id << " at " << joiner.host << ":"
+         << joiner.port << "\n";
+
+    // Snapshot the ring *before* adding the joiner, then add it.
+    vector<NodeInfo> current = router_->getAllPhysicalNodes();
+    router_->addPhysicalNode(joiner);
+
+    ostringstream oss;
+    oss << "RING_UPDATE\n" << current.size() << "\n";
+    for (const auto &n : current) {
+        oss << n.node_id << "|" << n.host << "|" << n.port << "\n";
+    }
+    reply(client_fd, oss.str());
 }

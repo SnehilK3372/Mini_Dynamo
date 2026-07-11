@@ -1,47 +1,53 @@
 #pragma once
 
 #include <memory>
-#include <optional>
 #include <string>
 
-#include "message.h"
+#include "coordinator.h"
+#include "metrics.h"
+#include "node_info.h"
+#include "replica_client.h"
 #include "storage/storage_engine.h"
 
 using namespace std;
 
 class Router;
 
-struct NodeInfo {
-    string node_id;
-    string host;
-    uint16_t port;
-    NodeInfo() = default;
-
-    NodeInfo(const string &id, const string &h, uint16_t p): node_id(id), host(h), port(p) {}
-};
-
-// A single cluster member. Owns its shard of the data (behind StorageEngine)
-// and acts as coordinator for requests that land on it: routing via the
-// Router's hash ring, replicating PUTs, and answering the wire protocol in
-// onMessageReceived. The TCP accept loop lives in TCPServer, which calls back
-// into onMessageReceived — this class has no networking loop of its own.
+// A single cluster member. Owns its shard (behind StorageEngine), its metrics,
+// and a Coordinator that runs the quorum/versioning/read-repair logic. Node
+// itself is the protocol edge: it parses a framed request payload, dispatches to
+// the Coordinator (or forwards to the primary owner), and writes a framed
+// response. The TCP accept loop lives in TCPServer, which calls handleRequest —
+// this class has no networking loop of its own.
 class Node {
 public:
-    // Storage is injected so tests can pass a fake and Tier 1A can pass
-    // RocksDB without touching coordinator logic.
-    Node(const NodeInfo &info, Router *router, unique_ptr<StorageEngine> storage);
+    // Storage is injected (RocksDB in production, in-memory for a memory-only
+    // build/tests). Node builds its own Metrics and TCP-backed ReplicaClient and
+    // wires up the Coordinator over them.
+    Node(const NodeInfo &info, Router *router, unique_ptr<StorageEngine> storage,
+         QuorumConfig cfg = {});
 
-    // wire-protocol dispatch (called by TCPServer per accepted connection)
-    void onMessageReceived(const Message &msg, int client_fd);
-
-    // storage handlers
-    string handlePut(const string &key, const string &value);
-    optional<string> handleGet(const string &key);
-    void handleReplicate(const string &key, const string &value);
+    // Handle one framed request payload; write a framed response to client_fd.
+    void handleRequest(const string &payload, int client_fd);
 
     NodeInfo info;
 
 private:
-    Router *router;
-    unique_ptr<StorageEngine> storage;
+    // Op handlers. Each writes a framed response to client_fd.
+    void handlePut(const vector<string> &f, const string &rawPayload, int client_fd);
+    void handleGet(const vector<string> &f, int client_fd);
+    void handleReplicate(const vector<string> &f, int client_fd);   // coordinator→replica write
+    void handleReadReplica(const vector<string> &f, int client_fd); // coordinator→replica read
+    void handleJoin(const string &payload, int client_fd);
+
+    int effN(int requested) const { return requested > 0 ? requested : cfg_.N; }
+    int effW(int requested) const { return requested > 0 ? requested : cfg_.W; }
+    int effR(int requested) const { return requested > 0 ? requested : cfg_.R; }
+
+    Router *router_;
+    unique_ptr<StorageEngine> storage_;
+    unique_ptr<Metrics> metrics_;
+    unique_ptr<ReplicaClient> replicas_;
+    unique_ptr<Coordinator> coordinator_;
+    QuorumConfig cfg_;
 };

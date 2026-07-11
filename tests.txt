@@ -1,19 +1,40 @@
+# Testing Mini Dynamo
 
-# Test1
-printf "PUT|k1|v1|cli" | nc node1 5001
+## Automated unit tests (the real suite)
 
-# Test2
-printf "PUT|k2|random_val|cli" | nc node2 5002
+Tier 1A adds a GoogleTest suite covering the logic that matters: vector-clock
+comparison (dominance vs. concurrency), versioned-value/base64 serialization,
+quorum coordination (W met / not met / slow replica), read reconciliation and
+siblings, read repair, and ring placement.
 
-# Test3
-printf "GET|k2|cli" | nc node2 5002
+    cmake -S . -B build -DBUILD_TESTING=ON
+    cmake --build build --target kvstore_tests
+    ./build/tests/kvstore_tests        # or: ctest --test-dir build
 
-# Test4
-printf "GET|k2|cli" | nc node1 5001
+The RocksDB persistence tests are included automatically when the build finds
+RocksDB (they are compiled out otherwise).
 
-# Test5
-docker stop node2
-printf "GET|k2|cli" | nc node3 5003
+## Manual cluster smoke test (Docker)
 
-#Test6
-docker start node2
+    docker-compose up --build          # node1 :5001 (bootstrap), node2 :5002, node3 :5003
+
+NOTE: the wire protocol is now length-prefixed framed — each message is
+`<byte-length>\n<payload>`. The old bare `printf "PUT|..." | nc` no longer works,
+because the server waits for a length header. Frame it like so:
+
+    # PUT key=k1 value="v1" (base64 "djE="), N=3 W=2 R=2, empty client clock
+    msg='PUT|k1|djE=|cli|3|2|2|'
+    printf '%s\n%s' "${#msg}" "$msg" | nc node1 5001
+
+    # GET key=k1, N=3 R=2   -> RESPONSE|OK|<base64 value>|<clock>
+    msg='GET|k1|cli|3|2'
+    printf '%s\n%s' "${#msg}" "$msg" | nc node1 5001
+
+## End-to-end availability + convergence scenario (proves the thesis)
+
+    # 1. write with W=2, 2. kill a replica, 3. read stays available (R=2),
+    # 4. restart the replica, 5. a read triggers read repair and it converges.
+    docker stop node2
+    # ... read via node3, still succeeds ...
+    docker start node2
+    # ... read again; the stale/restarted replica is repaired asynchronously ...

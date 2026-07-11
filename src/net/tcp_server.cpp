@@ -4,6 +4,7 @@
 #include <thread>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include "framing.h"
 using namespace std;
 
 
@@ -54,20 +55,14 @@ void TCPServer::start(){// init a tcp connection at given port associated with t
     }
 }
 
-void TCPServer::handleClient(int client_fd){// revceives and parses message received form client
-    char buffer[4096];
-    memset(buffer, 0, sizeof(buffer));
-
-    int valread = read(client_fd, buffer, sizeof(buffer));
-    if (valread <= 0) {
+void TCPServer::handleClient(int client_fd){// reads one framed request, dispatches, replies
+    string payload;
+    if (!framing::recvFramed(client_fd, payload)) {
         close(client_fd);
         return;
     }
 
-    string raw(buffer, valread);
-    Message m = Message::deserialize(raw);
-
-    node->onMessageReceived(m,client_fd);
+    node->handleRequest(payload, client_fd);
 
     close(client_fd);
 }

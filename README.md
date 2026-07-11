@@ -1,23 +1,30 @@
 # Mini Dynamo
 
-A distributed key-value store in C++17, modeled on [Amazon's Dynamo](https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf). Keys are placed on a **consistent-hashing ring with virtual nodes**; any node can accept a request and acts as **coordinator**, routing it to the key's owners and replicating writes to peers over raw TCP. New nodes join the cluster through a bootstrap handshake.
+A distributed key-value store in C++17, modeled on [Amazon's Dynamo](https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf). Keys are placed on a **consistent-hashing ring with virtual nodes**; any node can accept a request and acts as **coordinator**, routing it to the key's owners. Writes are versioned with **vector clocks**, replicated to N owners, and acknowledged by a **write quorum (W)**; reads gather a **read quorum (R)**, reconcile versions, return the current value (or conflicting **siblings**), and **repair** stale replicas. Each node persists to its own **RocksDB** instance. New nodes join through a bootstrap handshake.
 
-This README describes what the system does **today**. The roadmap toward tunable quorum, vector clocks, read repair, and durable storage is in [docs/build_plan.md](docs/build_plan.md); the full architectural reasoning is in [docs/full_arch.md](docs/full_arch.md).
+This README describes what the system does **today** (through Tier 1A). The roadmap and the full architectural reasoning are in [docs/build_plan.md](docs/build_plan.md) and [docs/full_arch.md](docs/full_arch.md); the per-tier decisions are in [docs/decisions/](docs/decisions/).
 
-## Architecture (current state)
+## Architecture
 
-Each node runs a `TCPServer` that accepts connections and hands each message to the `Node`, which dispatches by type. A `Router` holds the consistent-hashing ring (3 virtual nodes per physical node, 64-bit hashing) and answers "which N physical nodes own this key?". On **PUT**, the receiving node looks up the primary owner: if that's itself, it stores the value locally (behind a pluggable `StorageEngine` — currently an in-memory map) and replicates to the other owners fire-and-forget; otherwise it forwards the request to the primary and relays the reply. On **GET**, it walks the owner list and returns the first hit. On **JOIN**, a bootstrap node replies with the current ring so the joiner can learn all existing peers. Membership is learned only at join time — there is no gossip or failure detection yet.
+Each node runs a `TCPServer` that accepts framed connections and hands each request to the `Node`, which parses it and delegates to a `Coordinator`. A `Router` holds the consistent-hashing ring (virtual nodes, 64-bit hashing) and answers "which N physical nodes own this key?".
+
+- **PUT** forwards to the key's primary owner, which coordinates: it builds a new vector clock (its own entry bumped above what it already holds), writes the versioned value locally and to the other owners, and returns `OK` once **W** replicas acknowledge (else a retryable `quorum_not_met`).
+- **GET** is coordinated by whichever node receives it: it reads from the N owners, waits for **R** responses, and compares their clocks. If one version dominates, it returns that (and asynchronously repairs any strictly-stale replica). If two versions are concurrent, it returns all **siblings** for the client to reconcile.
+- Each replica persists the serialized `VersionedValue` to its own **RocksDB** directory — shared-nothing; nodes coordinate only over the network.
 
 ```
-client ──TCP──► any node (coordinator)
-                  │  Router: hash(key) → N owners on the ring
-                  ├─ owner == self → StorageEngine (in-memory)
-                  └─ else → forward/replicate to owner nodes ──► their StorageEngine
+client ──TCP(framed)──► coordinator
+                          │  Router: hash(key) → N owners
+                          │  vector clock ── quorum (W acks / R responses) ── read repair
+                          ▼
+               per-node RocksDB (durable, shared-nothing)
 ```
+
+`N`, `W`, `R` default to `3, 2, 2` (so `W+R>N`: a read set and a write set always overlap) and are tunable per request.
 
 ## Running the cluster
 
-Requires Docker. The compose file starts a 3-node cluster: `node1` (bootstrap, port 5001), `node2` (5002) and `node3` (5003), which join via `node1`.
+Requires Docker. The compose file starts a 3-node cluster: `node1` (bootstrap, port 5001), `node2` (5002), `node3` (5003).
 
 ```bash
 docker-compose up --build
@@ -27,35 +34,33 @@ A node is configured entirely by environment variables:
 
 | Variable | Meaning |
 |---|---|
-| `NODE_ID` | Unique node name (also used as its hostname on the ring) |
+| `NODE_ID` | Unique node name (also its hostname on the ring) |
 | `NODE_PORT` | TCP port to listen on |
 | `HOST` | Bind address (default `0.0.0.0`) |
 | `BOOTSTRAP_IP` / `BOOTSTRAP_PORT` | Existing node to join through; **omit both to start as the bootstrap node** |
+| `STORAGE_ENGINE` | `rocksdb` (default when compiled with RocksDB) or `memory` |
+| `DATA_DIR` | RocksDB directory (default `/data/<NODE_ID>`) |
 
-Building outside Docker requires Linux (the networking layer uses POSIX sockets): `cmake . && make -j4` produces `./kvstore`.
+Building outside Docker requires Linux (POSIX sockets): `cmake -S . -B build && cmake --build build -j4` produces `build/kvstore`. Unit tests build anywhere (see [tests.txt](tests.txt)).
 
 ## Wire protocol
 
-Plain TCP, pipe-delimited text. **Keys and values must not contain `|`** (no escaping) and requests must fit in a single 4 KB read.
+Plain TCP, **length-prefixed framed** (`<byte-length>\n<payload>`), payload pipe-delimited text. Values are **base64-encoded** so arbitrary bytes (including `|` and newlines) are carried safely; vector clocks serialize as `node1:3,node2:1`.
 
 | Request | Response |
 |---|---|
-| `PUT\|<key>\|<value>\|<origin>` | `RESPONSE\|OK` or `RESPONSE\|ERROR\|<reason>` |
-| `GET\|<key>\|<origin>` | `RESPONSE\|OK\|<value>` or `RESPONSE\|NOTFOUND` |
-| `REPLICATE\|<key>\|<value>\|<origin>` | `RESPONSE\|OK` (internal, node→node) |
+| `PUT\|<key>\|<b64value>\|<origin>\|<N>\|<W>\|<R>\|<clock>` | `RESPONSE\|OK\|<clock>` or `RESPONSE\|ERROR\|<reason>` |
+| `GET\|<key>\|<origin>\|<N>\|<R>` | `RESPONSE\|OK\|<b64value>\|<clock>`, `RESPONSE\|SIBLINGS\|<n>\|<b64v>\|<clk>...`, `RESPONSE\|NOTFOUND`, or `RESPONSE\|ERROR\|<reason>` |
+| `REPLICATE\|<key>\|<b64value>\|<origin>\|<clock>` | `RESPONSE\|OK` (internal, coordinator→replica) |
+| `READ\|<key>\|<origin>` | `VAL\|<b64value>\|<clock>` or `VAL\|NOTFOUND` (internal) |
 | `JOIN\|<node_id>\|<value>\|<origin>\|<host>\|<port>` | `RING_UPDATE\n<count>\n<id>\|<host>\|<port>\n...` |
 
-Try it against a running cluster:
+See [tests.txt](tests.txt) for framed `netcat` examples and the automated test commands.
 
-```bash
-docker exec node1 sh -c 'printf "PUT|k1|v1|cli" | nc localhost 5001'
-docker exec node1 sh -c 'printf "GET|k1|cli"    | nc localhost 5001'
-```
+## Future work
 
-## Current limitations (deliberate — this is the Tier 1A work)
+Named so the roadmap is honest, not as gaps in the current tier:
 
-- **No durability**: storage is in-memory; a restart loses the node's data.
-- **No write acknowledgment**: replication is fire-and-forget, so `OK` only guarantees the coordinator's local write.
-- **No versioning / conflict handling**: concurrent writes silently overwrite; there are no vector clocks yet.
-- **No read repair or anti-entropy**: replicas that miss a write stay stale until overwritten.
-- **Static membership**: nodes are learned at JOIN time only; a dead node is never removed from the ring.
+- **Hinted handoff** (stay writeable when an owner is down at write time) and **Merkle-tree anti-entropy** (repair rarely-read keys) — completing the AP convergence story beyond read repair. Per-replica sibling storage lands with these.
+- **Gateway** (Spring Boot REST + JWT + PostgreSQL metadata), **observability** (Prometheus/Grafana, structured logs), **CI**, load/chaos testing, and AWS deployment — Tiers 1B onward.
+- Gossip-based membership and dead-node removal (membership is currently learned only at JOIN).

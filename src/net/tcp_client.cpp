@@ -1,104 +1,103 @@
 #include "tcp_client.h"
-#include <iostream>
-#include <unistd.h>
+
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netdb.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
+
+#include <cerrno>
 #include <cstring>
-#include <vector>
+#include <iostream>
+
+#include "framing.h"
 
 using namespace std;
 
-bool TCPClient::send(const string &host, int port, const string &data) {
-    int sock = 0;
-    struct addrinfo hints{}, *res = nullptr;
+namespace {
 
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
+// Connect with a bounded wait: put the socket in non-blocking mode, start the
+// connect, and select() until it completes or the timeout elapses. Without this,
+// a peer that is down (host unreachable) would block the caller for the kernel's
+// default connect timeout — tens of seconds — defeating the coordinator's own
+// per-request deadline.
+bool connectWithTimeout(int sock, const sockaddr *addr, socklen_t addrlen, int timeout_ms) {
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
 
-    string port_str = to_string(port);
-    int err = getaddrinfo(host.c_str(), port_str.c_str(), &hints, &res);
-    if (err != 0 || res == nullptr) {
-        cerr << "Invalid address / hostname resolution failed: " << host
-                  << " (" << gai_strerror(err) << ")\n";
-        return false;
+    int rc = ::connect(sock, addr, addrlen);
+    if (rc == 0) {
+        fcntl(sock, F_SETFL, flags);
+        return true;  // connected immediately (loopback)
     }
+    if (errno != EINPROGRESS) return false;
 
-    sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (sock < 0) {
-        cerr << "Client socket creation error\n";
-        freeaddrinfo(res);
-        return false;
-    }
+    fd_set wset;
+    FD_ZERO(&wset);
+    FD_SET(sock, &wset);
+    timeval tv{};
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
 
-    if (connect(sock, res->ai_addr, res->ai_addrlen) < 0) {
-        cerr << "Connection failed to " << host << ":" << port << "\n";
-        freeaddrinfo(res);
-        close(sock);
-        return false;
-    }
+    rc = ::select(sock + 1, nullptr, &wset, nullptr, &tv);
+    if (rc <= 0) return false;  // timeout or error
 
-    freeaddrinfo(res);
+    int soErr = 0;
+    socklen_t len = sizeof(soErr);
+    if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &soErr, &len) < 0 || soErr != 0) return false;
 
-    ssize_t sent = ::send(sock, data.c_str(), data.size(), 0);
-    if (sent < 0) {
-        cerr << "Send failed\n";
-        close(sock);
-        return false;
-    }
-
-    close(sock);
+    fcntl(sock, F_SETFL, flags);  // back to blocking for framed send/recv
     return true;
 }
 
+}  // namespace
 
-string TCPClient::sendAndReceive(const string &host, int port, const string &data) {
-    int sock = 0;
-    struct addrinfo hints{}, *res = nullptr;
-
+string TCPClient::sendAndReceiveFramed(const string &host, int port, const string &data,
+                                       int timeout_ms) {
+    addrinfo hints{};
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
+    addrinfo *res = nullptr;
 
     string port_str = to_string(port);
     int err = getaddrinfo(host.c_str(), port_str.c_str(), &hints, &res);
     if (err != 0 || res == nullptr) {
-        cerr << "Invalid address" << host<< " (" << gai_strerror(err) << ")\n";
-        return ""; 
+        cerr << "[tcp_client] resolve failed for " << host << ": " << gai_strerror(err) << "\n";
+        return "";
     }
 
-    sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if (sock < 0) {
-        cerr << "Client socket creation error\n";
         freeaddrinfo(res);
         return "";
     }
 
-    if (connect(sock, res->ai_addr, res->ai_addrlen) < 0) {
-        cerr << "Connection failed to " << host << ":" << port << "\n";
+    if (!connectWithTimeout(sock, res->ai_addr, res->ai_addrlen, timeout_ms)) {
         freeaddrinfo(res);
         close(sock);
         return "";
     }
-
     freeaddrinfo(res);
 
-    ssize_t sent = ::send(sock, data.c_str(), data.size(), 0);
-    if (sent < 0) {
-        cerr << "Send failed\n";
+    // Bound the read as well, so a peer that accepts but never replies (or replies
+    // partially) can't hang us past the deadline.
+    timeval tv{};
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    if (!framing::sendFramed(sock, data)) {
         close(sock);
         return "";
     }
 
-    vector<char> buf(4096);
-    ssize_t n = ::read(sock, buf.data(), buf.size() - 1);
-    
-    close(sock);
-
-    if (n > 0) {
-        buf[n] = '\0';
-        return string(buf.data());
-    } else if (n < 0) {
-        cerr << "Read failed\n";
+    string reply;
+    if (!framing::recvFramed(sock, reply)) {
+        close(sock);
         return "";
     }
-    return "";
+    close(sock);
+    return reply;
 }
