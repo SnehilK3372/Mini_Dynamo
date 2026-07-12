@@ -21,11 +21,14 @@ bool Swim::applyEvent(const MemberEvent &event) {
     // Self-related events: if someone suspects us, refute.
     if (event.node_id == self_.node_id) {
         if (event.type == EventType::Suspect || event.type == EventType::Dead) {
-            if (event.incarnation <= incarnation_) {
-                // Stale suspicion — already refuted by our current incarnation.
+            if (event.incarnation < incarnation_) {
+                // Stale suspicion — it targets an older incarnation we have
+                // already superseded, so our current Alive already refutes it.
+                // A suspicion at our *current* incarnation is still live and must
+                // be refuted (bumped past), per the SWIM refutation rule.
                 return false;
             }
-            // Refute: bump incarnation and broadcast Alive.
+            // Refute: bump strictly past the suspected incarnation and broadcast Alive.
             incarnation_ = event.incarnation + 1;
             MemberEvent alive;
             alive.type = EventType::Alive;
