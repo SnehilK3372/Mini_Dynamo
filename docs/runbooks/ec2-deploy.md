@@ -199,8 +199,9 @@ docker compose down    # stop stack, keep the box
 
 | Symptom | Check |
 |---------|-------|
+| `compose build requires buildx 0.17.0 or later` | Amazon Linux's packaged Docker bundles an old buildx even when Docker itself is already installed. `bootstrap.sh` now upgrades it automatically; on an already-bootstrapped box, re-run `deploy/aws/bootstrap.sh` or manually drop a fresh `docker-buildx` binary into `/usr/libexec/docker/cli-plugins/` (Amazon Linux) or `/usr/lib/docker/cli-plugins/` (Ubuntu/Debian) from the [buildx releases page](https://github.com/docker/buildx/releases), then `chmod +x` it |
 | Node won't start / OOM | `docker compose logs node1`; confirm 8 GB, `free -h` |
-| k6 "network not found" | `docker network ls \| grep dhtnet`, export the right `NET` |
+| k6 "network not found" | `docker network ls \| grep dhtnet` — `bench/run.sh` auto-detects this now; only needed if you have multiple `*_dhtnet` networks |
 | k6 all 401 | wrong `AUTH_PASS` — must match `.env` `AUTH_PASSWORD` |
 | Prometheus target DOWN | `curl localhost:9101/metrics` on the box |
 | Disk full mid-build | `df -h`; prometheus-cpp build needs ≥30 GB headroom |
