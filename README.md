@@ -75,6 +75,34 @@ The suite covers the classic pyramid, and the whole thing runs in CI on every pu
 - `scripts/e2e.sh` brings up the full `docker compose` stack, writes with `W=2`, kills a node and reads with `R=2` to prove **availability under one failure**, then restarts the node and reads to prove **convergence via read repair**.
   `scripts/e2e.sh`
 
+## Deployment (AWS)
+
+The whole stack runs on a single EC2 instance via the existing `docker compose` file,
+with **only the gateway (`:8080`) exposed** — Grafana/Prometheus/Postgres/nodes stay
+private (Grafana is reached over an SSH tunnel). Full step-by-step runbook, security-group
+rules, secrets, and the manual redeploy workflow are in
+[`deploy/aws/README.md`](deploy/aws/README.md).
+
+```bash
+# on a fresh Amazon Linux 2023 / Ubuntu t3.medium (>=30 GB disk):
+curl -fsSL https://raw.githubusercontent.com/SnehilK3372/Mini_Dynamo/main/deploy/aws/bootstrap.sh | bash
+# then set real secrets in ~/Mini_Dynamo/.env and: docker compose up -d
+```
+
+Hitting the public API (see the runbook for the JWT flow and Swagger UI at
+`/swagger-ui.html`):
+
+```bash
+TOKEN=$(curl -s -X POST http://<host>:8080/v1/auth/token -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"<AUTH_PASSWORD>"}' | jq -r .token)
+curl http://<host>:8080/v1/kv/hello -H "Authorization: Bearer $TOKEN"
+```
+
+Redeploys are manual — **Actions → "Deploy to EC2 (manual)"** (no auto-deploy on merge).
+The gateway serves plain HTTP (JWT unencrypted in transit) — fine for a demo; front it with
+a reverse proxy for HTTPS if you keep it up. `t3.medium` is **not** free-tier — stop the
+instance when idle.
+
 ## Future work
 
 Named so the roadmap is honest, not as gaps in the current tier:
