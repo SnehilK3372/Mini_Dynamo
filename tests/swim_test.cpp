@@ -322,8 +322,9 @@ TEST(MemberEventTest, EmptyEventsRoundTrip) {
 
 TEST_F(SwimTest, CallbackFiredOnJoinAndDeath) {
     std::vector<std::pair<std::string, MemberState>> changes;
-    swim.onMemberChange(
-        [&](const NodeInfo &info, MemberState state) { changes.push_back({info.node_id, state}); });
+    swim.onMemberChange([&](const NodeInfo &info, MemberState state) {
+        changes.push_back({info.node_id, state});
+    });
 
     MemberEvent join;
     join.type = EventType::Join;
