@@ -12,7 +12,14 @@ set -euo pipefail
 export MSYS_NO_PATHCONV=1   # keep Git-Bash from mangling docker args / the URL (no-op on Linux)
 cd "$(dirname "$0")/.."
 
-NET="${NET:-project_mini-dynamo_dhtnet}"
+# The compose network is named "<project>_dhtnet", and the project name derives
+# from the checkout directory — so it's "project_mini-dynamo_dhtnet" on the dev
+# box but "mini_dynamo_dhtnet" on an EC2 clone. Auto-detect it (override with
+# NET=... if you happen to have several *_dhtnet networks).
+if [ -z "${NET:-}" ]; then
+  NET="$(docker network ls --format '{{.Name}}' | grep -m1 dhtnet || true)"
+fi
+: "${NET:?no *_dhtnet docker network found — is the stack up? (docker compose up -d)}"
 LABEL="${1:-load}"
 : "${N:=3}"; : "${W:=2}"; : "${R:=2}"; : "${VUS:=10}"; : "${DURATION:=30s}"; : "${WRITE_RATIO:=0.3}"
 : "${KEYPREFIX:=load}"; : "${KEYSPACE:=200}"
