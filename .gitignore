@@ -15,3 +15,8 @@ kvstore
 
 # Editor / tooling scratch
 .claude/
+
+# Runtime secrets — never commit a filled-in .env (template is deploy/aws/.env.example)
+.env
+**/.env
+!*.env.example

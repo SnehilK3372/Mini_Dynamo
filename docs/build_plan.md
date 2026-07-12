@@ -221,13 +221,13 @@ Do the four pieces in this order. Each depends on the previous one.
 
 **Goal:** Live URL. Sonnet 5; parts likely on Haiku 4.5 if truly mechanical.
 
-- [ ] Provision a single EC2 instance (Amazon Linux 2023 or Ubuntu, `t3.small` or `t3.medium`). Document the choice.
-- [ ] Security group: expose only the gateway port publicly (and Grafana if you want it public — behind basic auth if so).
-- [ ] Install Docker + Docker Compose; clone the repo; `docker-compose up -d`.
-- [ ] README section: public URL, how to reach Swagger UI, how to hit the API with `curl` including a JWT flow, cost caveat (t3.small is not free-tier — stop the instance when not demoing).
-- [ ] Extend the GitHub Actions workflow with a manual-trigger deploy job (SSH deploy or ECR + pull) — do **not** auto-deploy on every merge yet.
+- [~] Provision a single EC2 instance (Amazon Linux 2023 or Ubuntu, `t3.small` or `t3.medium`). Document the choice. *(Choice documented — **t3.medium**/AL2023, ≥30 GB — and `deploy/aws/bootstrap.sh` provided; the launch itself is operator-run, per `deploy/aws/README.md`.)*
+- [~] Security group: expose only the gateway port publicly (and Grafana if you want it public — behind basic auth if so). *(Rules documented: inbound 22 (my IP) + 8080 only; Grafana kept private via SSH tunnel. Operator applies.)*
+- [~] Install Docker + Docker Compose; clone the repo; `docker-compose up -d`. *(Automated by `bootstrap.sh`; runs on the instance.)*
+- [x] README section: public URL, how to reach Swagger UI, how to hit the API with `curl` including a JWT flow, cost caveat (t3.small is not free-tier — stop the instance when not demoing). *(README "Deployment (AWS)" + `deploy/aws/README.md`.)*
+- [x] Extend the GitHub Actions workflow with a manual-trigger deploy job (SSH deploy or ECR + pull) — do **not** auto-deploy on every merge yet. *(`.github/workflows/deploy.yml`, `workflow_dispatch` SSH deploy.)*
 
-**Definition of done:** anyone with the public URL and a token can hit `/v1/kv/*` and see the metrics dashboard.
+**Definition of done:** anyone with the public URL and a token can hit `/v1/kv/*` and see the metrics dashboard. — **Artifacts + runbook ready; the live-URL confirmation is operator-run (the assistant has no AWS access).**
 
 **Write `docs/decisions/tier-3.md`.** Cover: why EC2 + Compose over ECS/Fargate for this scope (fastest path, existing compose file reused); why RDS is not used here; what would change to move to Fargate.
 
