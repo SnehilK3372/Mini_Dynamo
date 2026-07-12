@@ -14,6 +14,7 @@
 #include "versioned_value.h"
 
 class Router;
+class HintStore;
 
 // Default quorum knobs (Dynamo's classic N=3, W=2, R=2 → W+R>N, so a read set
 // and a write set always overlap in at least one replica: strong-ish
@@ -44,6 +45,11 @@ struct GetResult {
 // with a fake client and an in-memory store.
 class Coordinator {
    public:
+    // is_alive_fn: optional callback that checks if a peer is alive (from SWIM).
+    // When set, the write path uses sloppy quorum: writes intended for dead nodes
+    // are routed to a stand-in, which stores a hint for later delivery.
+    using IsAliveFn = std::function<bool(const std::string &node_id)>;
+
     Coordinator(NodeInfo self, Router *router, StorageEngine *storage, ReplicaClient *replicas,
                 Metrics *metrics, QuorumConfig defaults = {});
 
@@ -75,6 +81,12 @@ class Coordinator {
     GetResult coordinateGet(const std::string &key, int N, int R);
 
     const QuorumConfig &defaults() const { return defaults_; }
+
+    // Inject the hint store and liveness check after construction (set from main
+    // once the gossip layer is ready; the coordinator works without them — it just
+    // can't do sloppy quorum).
+    void setHintStore(HintStore *store) { hint_store_ = store; }
+    void setLivenessCheck(IsAliveFn fn) { is_alive_fn_ = std::move(fn); }
 
    private:
     // Reads this node's own stored clock for a key (empty if absent). Used so a
@@ -108,6 +120,10 @@ class Coordinator {
     ReplicaClient *replicas_;
     Metrics *metrics_;
     QuorumConfig defaults_;
+
+    // Hinted handoff support (optional; null until gossip layer is ready).
+    HintStore *hint_store_ = nullptr;
+    IsAliveFn is_alive_fn_;
 
     // Counts outstanding background threads; the destructor drains it to zero.
     struct Background;

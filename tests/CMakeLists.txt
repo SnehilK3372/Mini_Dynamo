@@ -19,6 +19,9 @@ set(TEST_SOURCES
     versioned_value_test.cpp
     router_test.cpp
     coordinator_test.cpp
+    swim_test.cpp
+    hint_store_test.cpp
+    merkle_tree_test.cpp
 )
 
 # The RocksDB engine test only makes sense when the durable engine is compiled.

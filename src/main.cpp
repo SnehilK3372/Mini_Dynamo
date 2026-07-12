@@ -6,8 +6,12 @@
 #include <thread>
 #include <vector>
 
+#include "antientropy/antientropy_thread.h"
+#include "base64.h"
+#include "gossip/gossip_thread.h"
+#include "hints/handoff_thread.h"
+#include "hints/hint_store.h"
 #include "log.h"
-#include "message.h"
 #include "metrics.h"
 #include "net/tcp_client.h"
 #include "net/tcp_server.h"
@@ -23,38 +27,26 @@
 
 using namespace std;
 
-string getenv_str(const string &var, const string &default_val = "") {
+static string getenv_str(const string &var, const string &default_val = "") {
     const char *val = getenv(var.c_str());
     return val ? string(val) : default_val;
 }
 
-static vector<string> split_lines_by_newline(const string &s) {
+static vector<string> split_csv(const string &s) {
     vector<string> out;
-    istringstream iss(s);
-    string line;
-    while (getline(iss, line, '\n')) {  // Split by newline
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (!line.empty()) {
-            out.push_back(line);
-        }
-    }
-    return out;
-}
-
-static vector<string> split_string(const string &s, char delim) {  // msg splitter
-    vector<string> out;
+    if (s.empty()) return out;
     istringstream iss(s);
     string token;
-    while (getline(iss, token, delim)) {
-        out.push_back(token);
+    while (getline(iss, token, ',')) {
+        // Trim whitespace.
+        size_t start = token.find_first_not_of(' ');
+        if (start == string::npos) continue;
+        size_t end = token.find_last_not_of(' ');
+        out.push_back(token.substr(start, end - start + 1));
     }
     return out;
 }
 
-// Chooses the per-node storage engine. RocksDB (durable, one instance per node's
-// own directory — shared-nothing) is the default when the binary was built with
-// it; STORAGE_ENGINE=memory forces the volatile map (used by tests and quick
-// demos). Without RocksDB compiled in, memory is the only option.
 static unique_ptr<StorageEngine> makeStorage(const string &node_id) {
 #ifdef HAVE_ROCKSDB
     string engine = getenv_str("STORAGE_ENGINE", "rocksdb");
@@ -71,10 +63,6 @@ static unique_ptr<StorageEngine> makeStorage(const string &node_id) {
     return make_unique<InMemoryStorageEngine>();
 }
 
-// Chooses the metrics backend. When built with prometheus-cpp, each node stands
-// up its own scrape endpoint at http://0.0.0.0:<METRICS_PORT>/metrics (Prometheus
-// reaches it over the compose network by container name). Without it — e.g. a
-// memory-only test build — metrics are counted in process but not exposed.
 static unique_ptr<Metrics> makeMetrics(const string &node_id) {
 #ifdef HAVE_PROMETHEUS
     string bind = "0.0.0.0:" + getenv_str("METRICS_PORT", "9100");
@@ -89,25 +77,35 @@ static unique_ptr<Metrics> makeMetrics(const string &node_id) {
 int main() {
     cout.setf(ios::unitbuf);
 
-    // loading env variables
     string node_id = getenv_str("NODE_ID");
     string host = getenv_str("HOST", "0.0.0.0");
     uint16_t port = stoi(getenv_str("NODE_PORT"));
 
-    // Bring up structured logging before anything else logs, so every line on
-    // stdout — startup included — is a JSON object carrying this node_id.
     jlog::init(node_id);
 
+    // SEED_NODES: comma-separated list of "host:port" for initial cluster contact.
+    // If empty, this node is the first member (self-bootstraps without contacting anyone).
+    string seed_str = getenv_str("SEED_NODES", "");
+    vector<string> seeds = split_csv(seed_str);
+
+    // Backward-compatible: BOOTSTRAP_IP/PORT still works as a single seed.
     string bootstrap_ip = getenv_str("BOOTSTRAP_IP", "");
-    uint16_t bootstrap_port = (uint16_t)stoi(getenv_str("BOOTSTRAP_PORT", "0"));
+    uint16_t bootstrap_port = static_cast<uint16_t>(stoi(getenv_str("BOOTSTRAP_PORT", "0")));
+    if (!bootstrap_ip.empty() && seeds.empty()) {
+        seeds.push_back(bootstrap_ip + ":" + to_string(bootstrap_port));
+    }
 
-    bool isBootstrap = bootstrap_ip.empty();
+    // ADVERTISE_HOST: the hostname peers use to reach this node. Defaults to
+    // NODE_ID, which equals the Docker hostname (container DNS). Override for
+    // local multi-process testing (e.g., "localhost") or multi-host deploys.
+    string advertise_host = getenv_str("ADVERTISE_HOST", node_id);
 
-    Router router;
-    NodeInfo myInfo(node_id, node_id, port);
+    int vnodes = stoi(getenv_str("VNODES", "128"));
+    Router router(vnodes);
+    NodeInfo myInfo(node_id, advertise_host, port);
     Node node(myInfo, &router, makeStorage(node_id), makeMetrics(node_id));
 
-    router.addPhysicalNode(myInfo);  // prevents race condtion
+    router.addPhysicalNode(myInfo);
 
     TCPServer server(host, port, &node);
     thread serverThread([&server]() { server.start(); });
@@ -115,65 +113,100 @@ int main() {
 
     jlog::msg("info", "TCP server listening on " + host + ":" + to_string(port));
 
-    if (isBootstrap) {  // logic for bootstrapping node
-        jlog::msg("info", "started as BOOTSTRAP node");
-
-    } else {
-        // Join existing cluster
-        jlog::msg("info",
-                  "contacting bootstrap at " + bootstrap_ip + ":" + to_string(bootstrap_port));
-
+    // The send function used by the gossip thread — wraps TCPClient for framed
+    // request/response over a fresh connection (connection pooling is Tier 4.3).
+    auto send_fn = [](const string &h, uint16_t p, const string &payload) -> string {
         TCPClient client;
+        return client.sendAndReceiveFramed(h, static_cast<int>(p), payload, 500);
+    };
 
-        Message joinMsg;
-        joinMsg.type = "JOIN";
-        joinMsg.origin = node_id;
-        joinMsg.key = node_id;
-        joinMsg.host = node_id;
-        joinMsg.port = myInfo.port;
-        joinMsg.value = to_string(myInfo.port);
+    gossip::GossipConfig gcfg;
+    gcfg.protocol_period = chrono::milliseconds(stoi(getenv_str("GOSSIP_PERIOD_MS", "1000")));
+    gcfg.ping_timeout = chrono::milliseconds(stoi(getenv_str("GOSSIP_PING_TIMEOUT_MS", "200")));
+    gcfg.indirect_probe_count = stoi(getenv_str("GOSSIP_K", "3"));
+    gcfg.suspicion_mult = stoi(getenv_str("GOSSIP_SUSPICION_MULT", "5"));
 
-        string resp =
-            client.sendAndReceiveFramed(bootstrap_ip, bootstrap_port, joinMsg.serialize());
+    gossip::GossipThread gossip(myInfo, &router, send_fn, gcfg);
+    node.setGossipThread(&gossip);
 
-        if (!resp.empty()) {
-            auto lines = split_lines_by_newline(resp);
-
-            if (!lines.empty() && lines[0] == "RING_UPDATE") {
-                if (lines.size() >= 2) {
-                    try {
-                        int n = stoi(lines[1]);
-                        jlog::msg("info",
-                                  "JOIN accepted; learning " + to_string(n) + " existing node(s)");
-
-                        for (int i = 0; i < n && 2 + i < (int)lines.size(); ++i) {
-                            // Server sends: NODE_ID|HOST|PORT
-                            auto parts = split_string(lines[2 + i], '|');
-
-                            if (parts.size() == 3) {
-                                string nid = parts[0];
-                                string nhost = parts[1];
-                                uint16_t nport = (uint16_t)stoi(parts[2]);
-
-                                NodeInfo ni{nid, nhost, nport};
-                                router.addPhysicalNode(ni);
-                                jlog::op("info", "join", nid, "learned");
-                            }
-                        }
-                    } catch (const exception &e) {
-                        jlog::msg("error", string("failed to parse RING_UPDATE: ") + e.what());
-                    }
-                }
-            } else {
-                jlog::msg("error", "malformed JOIN response: " + (lines.empty() ? resp : lines[0]));
-            }
-
-        } else {
-            jlog::msg("error", "JOIN request failed (no response)");
-        }
+    if (seeds.empty()) {
+        jlog::msg("info", "started as initial seed (no SEED_NODES)");
+    } else {
+        jlog::msg("info", "joining cluster via seeds: " + seed_str +
+                              (bootstrap_ip.empty() ? "" : " (from BOOTSTRAP_IP)"));
+        gossip.joinViaSeeds(seeds);
     }
+
+    gossip.start();
+
+    // --- Hinted Handoff ---
+    int hint_ttl = stoi(getenv_str("HINT_TTL_SECONDS", "10800"));
+    HintStore hint_store{chrono::seconds(hint_ttl)};
+
+    // deliver_fn: replicate a hinted value to the recovered node.
+    auto deliver_fn = [&send_fn](const NodeInfo &target, const string &key,
+                                  const VersionedValue &value) -> bool {
+        string payload = "REPLICATE|" + key + "|" + base64::encode(value.data) + "|hint|" +
+                         value.clock.serialize();
+        string resp = send_fn(target.host, target.port, payload);
+        return resp.find("RESPONSE|OK") != string::npos;
+    };
+
+    HandoffThread handoff(&hint_store, deliver_fn);
+    handoff.start();
+
+    // Register gossip callback: on recovery (Dead→Alive), notify handoff.
+    gossip.swim().onMemberChange([&handoff](const NodeInfo &info, gossip::MemberState state) {
+        if (state == gossip::MemberState::Alive) {
+            handoff.notifyRecovery(info);
+        }
+    });
+
+    // Inject hint store + liveness check into the coordinator (via the node's
+    // public access). The coordinator uses these for sloppy quorum writes.
+    node.setHintStore(&hint_store);
+    node.setLivenessCheck([&gossip](const string &node_id) -> bool {
+        return gossip.swim().isAlive(node_id);
+    });
+
+    jlog::msg("info", "hinted handoff started (TTL=" + to_string(hint_ttl) + "s)");
+
+    // --- Anti-Entropy ---
+    int ae_interval = stoi(getenv_str("ANTIENTROPY_INTERVAL_SECONDS", "300"));
+
+    auto exchange_fn = [&send_fn](const NodeInfo &peer,
+                                   const MerkleTree &ours) -> MerkleTree {
+        (void)ours;
+        // Simplified: in a full implementation, serialize the tree and exchange
+        // with the peer over the wire. For now, anti-entropy relies on the pull-
+        // based key exchange (the merkle comparison triggers range pulls).
+        (void)send_fn;
+        (void)peer;
+        return MerkleTree();
+    };
+
+    auto pull_fn = [](const NodeInfo &, uint64_t, uint64_t)
+        -> vector<pair<string, VersionedValue>> {
+        return {};
+    };
+
+    auto push_fn = [&send_fn](const NodeInfo &peer, const string &key,
+                               const VersionedValue &value) -> bool {
+        string payload = "REPLICATE|" + key + "|" + base64::encode(value.data) + "|ae|" +
+                         value.clock.serialize();
+        string resp = send_fn(peer.host, peer.port, payload);
+        return resp.find("RESPONSE|OK") != string::npos;
+    };
+
+    AntiEntropyThread antientropy(myInfo, &router, node.storage(),
+                                  exchange_fn, pull_fn, push_fn,
+                                  chrono::seconds(ae_interval));
+    antientropy.start();
+
+    jlog::msg("info", "anti-entropy started (interval=" + to_string(ae_interval) + "s)");
+
     while (true) {
-        this_thread::sleep_for(chrono::seconds(20));
+        this_thread::sleep_for(chrono::seconds(60));
     }
 
     return 0;

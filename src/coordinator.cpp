@@ -7,6 +7,7 @@
 #include <thread>
 #include <utility>
 
+#include "hints/hint_store.h"
 #include "router.h"
 
 using namespace std;
@@ -121,10 +122,49 @@ PutResult Coordinator::writeQuorum(const string &key, const VersionedValue &vv, 
     auto q = make_shared<WriteQuorum>();
     int localAcks = 0;
     vector<NodeInfo> remotes;
+
+    // Sloppy quorum: if a target is known-dead (via gossip), pick the next alive
+    // node from the ring as a stand-in and store a hint for later delivery.
+    // This keeps writes available through single-node failures.
+    vector<NodeInfo> all_nodes;
+    if (is_alive_fn_ && hint_store_) {
+        all_nodes = router_->getAllPhysicalNodes();
+    }
+
     for (const auto &owner : owners) {
         if (owner.node_id == self_.node_id) {
-            storage_->put(key, serialized);  // local write is synchronous and durable
+            storage_->put(key, serialized);
             ++localAcks;
+        } else if (is_alive_fn_ && !is_alive_fn_(owner.node_id)) {
+            // Owner is dead — find a stand-in from the ring that is alive and
+            // not already in the owner list.
+            bool found_standin = false;
+            for (const auto &candidate : all_nodes) {
+                if (candidate.node_id == self_.node_id) continue;
+                if (candidate.node_id == owner.node_id) continue;
+                bool already_in_owners = false;
+                for (const auto &o : owners) {
+                    if (o.node_id == candidate.node_id) {
+                        already_in_owners = true;
+                        break;
+                    }
+                }
+                if (already_in_owners) continue;
+                if (!is_alive_fn_(candidate.node_id)) continue;
+                // Use this candidate as stand-in.
+                remotes.push_back(candidate);
+                found_standin = true;
+                break;
+            }
+            // Store a hint regardless of whether we found a stand-in.
+            if (hint_store_) {
+                hint_store_->store(owner.node_id, key, vv);
+            }
+            if (!found_standin) {
+                // No stand-in available — write locally as hint holder.
+                storage_->put(key, serialized);
+                ++localAcks;
+            }
         } else {
             remotes.push_back(owner);
         }
@@ -135,8 +175,6 @@ PutResult Coordinator::writeQuorum(const string &key, const VersionedValue &vv, 
     }
     const int remoteCount = static_cast<int>(remotes.size());
 
-    // Capture the borrowed pointer and timeout by value; the worker must never
-    // touch `this`, which may be gone by the time a slow worker runs.
     ReplicaClient *replicas = replicas_;
     auto timeout = defaults_.timeout;
     for (const auto &peer : remotes) {
@@ -149,8 +187,6 @@ PutResult Coordinator::writeQuorum(const string &key, const VersionedValue &vv, 
         });
     }
 
-    // Wake as soon as W is met, or once every remote has answered (so a cluster
-    // of instantly-failing replicas doesn't force us to burn the whole timeout).
     const auto deadline = chrono::steady_clock::now() + defaults_.timeout;
     int finalAcks;
     {

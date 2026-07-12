@@ -35,6 +35,16 @@ class PrometheusMetrics : public Metrics {
     void incReadRepair() override;
     uint64_t readRepairCount() const override;
 
+    void incHintStored() override;
+    void incHintDelivered() override;
+    uint64_t hintStoredCount() const override;
+    uint64_t hintDeliveredCount() const override;
+
+    void incAntiEntropySync() override;
+    void incAntiEntropyKeysRepaired() override;
+    uint64_t antiEntropySyncCount() const override;
+    uint64_t antiEntropyKeysRepairedCount() const override;
+
    private:
     // Registry must outlive the Exposer (which holds a weak_ptr to it), so it is
     // declared first and the Exposer is torn down before it.
@@ -48,5 +58,9 @@ class PrometheusMetrics : public Metrics {
     std::array<prometheus::Counter *, 3> quorum_ok_{};
     std::array<prometheus::Counter *, 3> quorum_fail_{};
     prometheus::Counter *read_repair_ = nullptr;
+    prometheus::Counter *hints_stored_ = nullptr;
+    prometheus::Counter *hints_delivered_ = nullptr;
+    prometheus::Counter *ae_syncs_ = nullptr;
+    prometheus::Counter *ae_keys_repaired_ = nullptr;
     prometheus::Gauge *node_up_ = nullptr;
 };

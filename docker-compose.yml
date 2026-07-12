@@ -1,30 +1,35 @@
 services:
   node1:
-    build: .
+    build:
+      context: .
+      args:
+        WITH_PROMETHEUS: ${WITH_PROMETHEUS:-ON}
     container_name: node1
     hostname: node1
     environment:
       NODE_ID: node1
       NODE_PORT: 5001
       METRICS_PORT: 9100
-      # node1 is bootstrap, no BOOTSTRAP_IP
+      # node1 is the initial seed — no SEED_NODES means self-bootstrap.
     ports:
       - "5001:5001"
-      - "9101:9100"   # Prometheus /metrics (host-side; Prometheus scrapes node1:9100 internally)
+      - "9101:9100"
     networks:
       - dhtnet
     restart: unless-stopped
 
   node2:
-    build: .
+    build:
+      context: .
+      args:
+        WITH_PROMETHEUS: ${WITH_PROMETHEUS:-ON}
     container_name: node2
     hostname: node2
     environment:
       NODE_ID: node2
       NODE_PORT: 5002
       METRICS_PORT: 9100
-      BOOTSTRAP_IP: node1
-      BOOTSTRAP_PORT: 5001
+      SEED_NODES: node1:5001
     ports:
       - "5002:5002"
       - "9102:9100"
@@ -35,23 +40,26 @@ services:
     restart: unless-stopped
 
   node3:
-    build: .
+    build:
+      context: .
+      args:
+        WITH_PROMETHEUS: ${WITH_PROMETHEUS:-ON}
     container_name: node3
     hostname: node3
     environment:
       NODE_ID: node3
       NODE_PORT: 5003
-      BOOTSTRAP_IP: node1
-      BOOTSTRAP_PORT: 5001
+      METRICS_PORT: 9100
+      SEED_NODES: node1:5001
     ports:
       - "5003:5003"
+      - "9103:9100"
     networks:
       - dhtnet
     depends_on:
       - node1
     restart: unless-stopped
 
-  # PostgreSQL for the gateway's metadata (node registry, config versions, audit log).
   postgres:
     image: postgres:16-alpine
     container_name: postgres
@@ -70,7 +78,6 @@ services:
       retries: 10
     restart: unless-stopped
 
-  # Spring Boot gateway: REST + JWT in front of the cluster, metadata in Postgres.
   gateway:
     build: ./gateway
     container_name: gateway
@@ -82,6 +89,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:-dev-only-insecure-secret-change-me-please-0123456789}
       AUTH_USERNAME: ${AUTH_USERNAME:-admin}
       AUTH_PASSWORD: ${AUTH_PASSWORD:-changeme}
+      JAVA_TOOL_OPTIONS: ${JAVA_TOOL_OPTIONS:-}
     ports:
       - "8080:8080"
     networks:
@@ -93,8 +101,6 @@ services:
         condition: service_started
     restart: unless-stopped
 
-  # Prometheus scrapes the gateway (/actuator/prometheus) and every node
-  # (/metrics) over the compose network; config is mounted from deploy/.
   prometheus:
     image: prom/prometheus:v2.54.1
     container_name: prometheus
@@ -111,8 +117,6 @@ services:
       - gateway
     restart: unless-stopped
 
-  # Grafana with its datasource + dashboard provisioned from deploy/grafana, so
-  # the "Mini Dynamo" dashboard is populated the moment the stack is up.
   grafana:
     image: grafana/grafana:11.2.0
     container_name: grafana

@@ -37,7 +37,7 @@ void TCPServer::start() {  // init a tcp connection at given port associated wit
         exit(EXIT_FAILURE);
     }
 
-    if (listen(server_fd, 10) < 0) {
+    if (listen(server_fd, 1024) < 0) {
         perror("listen");
         exit(EXIT_FAILURE);
     }

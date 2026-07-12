@@ -3,15 +3,17 @@
 A minimal, reproducible deploy: one EC2 box running the existing `docker compose`
 stack, with only the gateway exposed to the internet. ~15 minutes end to end.
 
-> **Cost:** `t3.medium` is **not** free-tier (~$0.04/hr in most regions). **Stop or
+> **Cost:** `m7i-flex.large` is **not** free-tier (~$0.07/hr in us-east-1). **Stop or
 > terminate the instance when you're not demoing.**
 
 ## 1. Launch the instance
 
 - **AMI:** Amazon Linux 2023 (or Ubuntu 22.04+).
-- **Type:** **t3.medium** (4 GB RAM). The stack is ~7 containers — a JVM gateway,
-  Grafana, Prometheus, three C++ nodes, and Postgres — so `t3.small` (2 GB) will
-  likely OOM. Don't go smaller.
+- **Type:** **m7i-flex.large** (2 vCPU, 8 GB RAM). Tier 4 adds gossip protocol,
+  hinted handoff, and anti-entropy threads per node alongside the JVM gateway,
+  Grafana, Prometheus, three C++ nodes, and Postgres — `t3.medium` (4 GB) risks
+  OOM under load testing. `m7i-flex` delivers consistent compute without burstable
+  credit throttling, which matters for gossip protocol timing.
 - **Storage:** **≥ 30 GB gp3.** The node image compiles `prometheus-cpp` from source
   and the stack pulls several images; a small root volume fills up and Docker then
   fails to start. Give it headroom.

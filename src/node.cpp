@@ -90,6 +90,12 @@ void Node::handleRequest(const string &payload, int client_fd) {
         handleJoin(payload, client_fd);
     } else if (type == "RING") {
         handleRingQuery(client_fd);
+    } else if (type == "SWIM_PING" || type == "SWIM_PING_REQ" || type == "SWIM_ACK" ||
+               type == "SWIM_JOIN") {
+        if (gossip_) {
+            string resp = gossip_->handleMessage(payload);
+            if (!resp.empty()) reply(client_fd, resp);
+        }
     } else {
         reply(client_fd, "RESPONSE|ERROR|unknown_command");
     }
