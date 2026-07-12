@@ -64,6 +64,29 @@ PrometheusMetrics::PrometheusMetrics(const std::string &bind_address, const std:
         quorum_fail_[idx(op)] = &quorum_family.Add(fail);
     }
     read_repair_ = &repair_family.Add(node);
+
+    auto &hints_stored_family = BuildCounter()
+                                    .Name("minidynamo_hints_stored_total")
+                                    .Help("Hints stored for downed replica nodes")
+                                    .Register(*registry_);
+    auto &hints_delivered_family = BuildCounter()
+                                       .Name("minidynamo_hints_delivered_total")
+                                       .Help("Hints successfully delivered on node recovery")
+                                       .Register(*registry_);
+    auto &ae_syncs_family = BuildCounter()
+                                .Name("minidynamo_antientropy_syncs_total")
+                                .Help("Anti-entropy Merkle sync rounds completed")
+                                .Register(*registry_);
+    auto &ae_keys_family = BuildCounter()
+                               .Name("minidynamo_antientropy_keys_repaired_total")
+                               .Help("Keys repaired by anti-entropy sync")
+                               .Register(*registry_);
+
+    hints_stored_ = &hints_stored_family.Add(node);
+    hints_delivered_ = &hints_delivered_family.Add(node);
+    ae_syncs_ = &ae_syncs_family.Add(node);
+    ae_keys_repaired_ = &ae_keys_family.Add(node);
+
     node_up_ = &up_family.Add(node);
     node_up_->Set(1);
 
@@ -86,4 +109,22 @@ void PrometheusMetrics::incReadRepair() { read_repair_->Increment(); }
 
 uint64_t PrometheusMetrics::readRepairCount() const {
     return static_cast<uint64_t>(read_repair_->Value());
+}
+
+void PrometheusMetrics::incHintStored() { hints_stored_->Increment(); }
+void PrometheusMetrics::incHintDelivered() { hints_delivered_->Increment(); }
+uint64_t PrometheusMetrics::hintStoredCount() const {
+    return static_cast<uint64_t>(hints_stored_->Value());
+}
+uint64_t PrometheusMetrics::hintDeliveredCount() const {
+    return static_cast<uint64_t>(hints_delivered_->Value());
+}
+
+void PrometheusMetrics::incAntiEntropySync() { ae_syncs_->Increment(); }
+void PrometheusMetrics::incAntiEntropyKeysRepaired() { ae_keys_repaired_->Increment(); }
+uint64_t PrometheusMetrics::antiEntropySyncCount() const {
+    return static_cast<uint64_t>(ae_syncs_->Value());
+}
+uint64_t PrometheusMetrics::antiEntropyKeysRepairedCount() const {
+    return static_cast<uint64_t>(ae_keys_repaired_->Value());
 }

@@ -4,6 +4,7 @@
 #include <string>
 
 #include "coordinator.h"
+#include "gossip/gossip_thread.h"
 #include "metrics.h"
 #include "node_info.h"
 #include "replica_client.h"
@@ -24,13 +25,25 @@ class Node {
     // Storage and Metrics are injected: RocksDB + PrometheusMetrics in production,
     // in-memory versions for a memory-only build/tests. Passing a null Metrics
     // selects InMemoryMetrics, so existing call sites (and tests) keep working
-    // without a Prometheus dependency. Node builds its own TCP-backed
-    // ReplicaClient and wires up the Coordinator over these.
+    // without a Prometheus dependency.
     Node(const NodeInfo &info, Router *router, unique_ptr<StorageEngine> storage,
          unique_ptr<Metrics> metrics = nullptr, QuorumConfig cfg = {});
 
     // Handle one framed request payload; write a framed response to client_fd.
     void handleRequest(const string &payload, int client_fd);
+
+    // Set the gossip thread (called from main after constructing everything).
+    void setGossipThread(gossip::GossipThread *gossip) { gossip_ = gossip; }
+
+    // Inject hint store + liveness check for sloppy quorum (called from main
+    // once gossip is ready).
+    void setHintStore(HintStore *store) { coordinator_->setHintStore(store); }
+    void setLivenessCheck(Coordinator::IsAliveFn fn) {
+        coordinator_->setLivenessCheck(std::move(fn));
+    }
+
+    // Access to the underlying storage (needed by anti-entropy thread to iterate keys).
+    StorageEngine *storage() const { return storage_.get(); }
 
     NodeInfo info;
 
@@ -54,4 +67,5 @@ class Node {
     unique_ptr<ReplicaClient> replicas_;
     unique_ptr<Coordinator> coordinator_;
     QuorumConfig cfg_;
+    gossip::GossipThread *gossip_ = nullptr;
 };

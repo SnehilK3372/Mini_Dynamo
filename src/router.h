@@ -1,8 +1,8 @@
 #pragma once
 #include <map>
-#include <mutex>
 #include <optional>
 #include <set>
+#include <shared_mutex>
 #include <string>
 #include <vector>
 
@@ -13,7 +13,7 @@ using namespace std;
 
 class Router {
    public:
-    Router(int vnodes = 3);
+    Router(int vnodes = 128);
 
     void addPhysicalNode(const NodeInfo &node);
     void removePhysicalNode(const string &node_id);
@@ -25,12 +25,11 @@ class Router {
     vector<NodeInfo> getAllPhysicalNodes();
 
    private:
-    int virtual_nodes;  // number of virtual nodes per physical node
-    // ring: map from vnode_hash -> physical node_id#replicaIndex (value stores physical id)
+    int virtual_nodes;
     map<uint64_t, string> ring;
     map<string, NodeInfo> nodes;
 
-    mutex mtx;
+    mutable shared_mutex mtx_;
 
     void insertVNode(const NodeInfo &node, int replica_index);
 };

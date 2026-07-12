@@ -43,6 +43,18 @@ class Metrics {
     // Called once per replica that a read repair pushes a fresh version to.
     virtual void incReadRepair() = 0;
     virtual uint64_t readRepairCount() const = 0;
+
+    // Hinted handoff.
+    virtual void incHintStored() = 0;
+    virtual void incHintDelivered() = 0;
+    virtual uint64_t hintStoredCount() const = 0;
+    virtual uint64_t hintDeliveredCount() const = 0;
+
+    // Anti-entropy.
+    virtual void incAntiEntropySync() = 0;
+    virtual void incAntiEntropyKeysRepaired() = 0;
+    virtual uint64_t antiEntropySyncCount() const = 0;
+    virtual uint64_t antiEntropyKeysRepairedCount() const = 0;
 };
 
 // Default process-local implementation: plain atomic counters, no HTTP surface.
@@ -62,8 +74,26 @@ class InMemoryMetrics : public Metrics {
         return read_repair_.load(std::memory_order_relaxed);
     }
 
-    // Extra readers so tests can assert on the new counters if they want to;
-    // the interface deliberately keeps only readRepairCount() virtual.
+    void incHintStored() override { hints_stored_.fetch_add(1, std::memory_order_relaxed); }
+    void incHintDelivered() override { hints_delivered_.fetch_add(1, std::memory_order_relaxed); }
+    uint64_t hintStoredCount() const override {
+        return hints_stored_.load(std::memory_order_relaxed);
+    }
+    uint64_t hintDeliveredCount() const override {
+        return hints_delivered_.load(std::memory_order_relaxed);
+    }
+
+    void incAntiEntropySync() override { ae_syncs_.fetch_add(1, std::memory_order_relaxed); }
+    void incAntiEntropyKeysRepaired() override {
+        ae_keys_repaired_.fetch_add(1, std::memory_order_relaxed);
+    }
+    uint64_t antiEntropySyncCount() const override {
+        return ae_syncs_.load(std::memory_order_relaxed);
+    }
+    uint64_t antiEntropyKeysRepairedCount() const override {
+        return ae_keys_repaired_.load(std::memory_order_relaxed);
+    }
+
     uint64_t requestCount() const { return requests_.load(std::memory_order_relaxed); }
     uint64_t quorumSuccessCount() const { return quorum_ok_.load(std::memory_order_relaxed); }
     uint64_t quorumFailureCount() const { return quorum_fail_.load(std::memory_order_relaxed); }
@@ -73,4 +103,8 @@ class InMemoryMetrics : public Metrics {
     std::atomic<uint64_t> quorum_ok_{0};
     std::atomic<uint64_t> quorum_fail_{0};
     std::atomic<uint64_t> read_repair_{0};
+    std::atomic<uint64_t> hints_stored_{0};
+    std::atomic<uint64_t> hints_delivered_{0};
+    std::atomic<uint64_t> ae_syncs_{0};
+    std::atomic<uint64_t> ae_keys_repaired_{0};
 };

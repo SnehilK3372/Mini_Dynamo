@@ -91,7 +91,18 @@ bring_up() {
   log "Done. Gateway on :8080. Set secrets in $REPO_DIR/.env then re-run 'docker compose up -d'."
 }
 
+# --- Sanity check: warn if the instance has less than 6 GB RAM ----------------
+check_memory() {
+  local mem_kb
+  mem_kb=$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+  if [ "$mem_kb" -lt 6000000 ]; then
+    log "WARNING: This instance has ~$((mem_kb / 1024)) MB RAM."
+    log "Tier 4 stack needs ≥8 GB (m7i-flex.large recommended). OOM kills are likely."
+  fi
+}
+
 command -v git >/dev/null 2>&1 || { sudo dnf -y install git 2>/dev/null || sudo apt-get install -y git; }
+check_memory
 install_docker
 fetch_repo
 seed_env

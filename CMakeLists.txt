@@ -17,6 +17,12 @@ add_library(kv_core STATIC
     src/message.cpp
     src/coordinator.cpp
     src/storage/in_memory_storage.cpp
+    src/gossip/member_event.cpp
+    src/gossip/swim.cpp
+    src/hints/hint_store.cpp
+    src/hints/handoff_thread.cpp
+    src/antientropy/merkle_tree.cpp
+    src/antientropy/antientropy_thread.cpp
 )
 target_include_directories(kv_core PUBLIC src)
 target_link_libraries(kv_core PUBLIC Threads::Threads)
@@ -72,6 +78,7 @@ if(UNIX)
         src/net/tcp_client.cpp
         src/net/framing.cpp
         src/net/tcp_replica_client.cpp
+        src/gossip/gossip_thread.cpp
     )
     if(HAVE_ROCKSDB)
         list(APPEND NODE_SOURCES src/storage/rocksdb_storage.cpp)
