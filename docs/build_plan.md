@@ -205,11 +205,11 @@ Do the four pieces in this order. Each depends on the previous one.
 
 **Goal:** Real numbers to back the availability thesis. Sonnet 5.
 
-- [ ] k6 script (`bench/load.js`): concurrent PUT/GET traffic, reports throughput and p50/p95/p99. Parameterized on N/W/R.
-- [ ] Chaos script (`bench/chaos.sh`): kill a node mid-load, wait, restart it. Assertions/logs prove reads still succeeded during the kill and that read-repair converged the replica after restart.
-- [ ] `bench/RESULTS.md`: recorded throughput and latency for `N=3, W=2, R=2` at a couple of concurrency levels; a note on chaos-test behavior. Include a Grafana screenshot if possible.
+- [x] k6 script (`bench/load.js`): concurrent PUT/GET traffic, reports throughput and p50/p95/p99. Parameterized on N/W/R. *(+ `bench/run.sh` wrapper.)*
+- [x] Chaos script (`bench/chaos.sh`): kill a node mid-load, wait, restart it. Assertions/logs prove reads still succeeded during the kill and that read-repair converged the replica after restart. *(CHAOS PASSED: 97.4% reads served, read_repair +6.)*
+- [x] `bench/RESULTS.md`: recorded throughput and latency for `N=3, W=2, R=2` at a couple of concurrency levels; a note on chaos-test behavior. Include a Grafana screenshot if possible. *(Real numbers recorded; Grafana screenshot skipped — optional, live dashboard at :3000.)*
 
-**Definition of done:** `bench/RESULTS.md` has real numbers; chaos script is runnable in one command.
+**Definition of done:** `bench/RESULTS.md` has real numbers; chaos script is runnable in one command. — **DONE.**
 
 **Write `docs/decisions/tier-2.md`.** Cover: why k6 over JMeter; what the numbers say about throughput vs quorum tightness (W=1 vs W=2).
 
@@ -235,15 +235,48 @@ Do the four pieces in this order. Each depends on the previous one.
 
 ---
 
+## Tier 4 — Horizontal scalability (SKETCH)
+
+**Goal:** Lift the hard ceiling Tier 2 documented (see `docs/decisions/tier-2.md` §Scaling limits): the system routes correctly only up to ~3–7 nodes because **membership is learned only at JOIN through a single bootstrap, so ring views diverge and only the bootstrap is ever complete**, and client throughput is capped by a single gateway. This tier makes the cluster genuinely scale-out. Reasoning-heavy — plan each sub-tier in plan mode before building; this is an outline, not a scheduled plan. Consolidates several items from *Deferred / future work* below.
+
+### 4.1 — Gossip / SWIM membership *(the load-bearing change)*
+- [ ] Replace JOIN-only membership with a **gossip protocol (SWIM-style)**: every node converges on the *same* full ring, and membership changes propagate incrementally instead of being frozen at join time.
+- [ ] **Seed list, not a single bootstrap** (N seeds; any can admit a joiner) — removes the join SPOF/serialization point.
+- [ ] **Failure detection + dead-node removal** (suspect → confirmed dead → dropped from the ring), and rejoin/partition-heal.
+- [ ] Tests: N nodes all converge to an *identical* ring; a killed node is detected and removed; a healed partition reconciles membership.
+
+### 4.2 — Hinted handoff + Merkle anti-entropy
+- [ ] **Hinted handoff:** a write whose owner is down is accepted by a stand-in with a hint and handed off when the owner returns — directly removes the "write to a downed key's primary fails (502)" limitation Tier 2 found.
+- [ ] **Merkle-tree anti-entropy:** replicas periodically reconcile whole key ranges, so rarely-read keys converge without waiting for a read. (Completes the AP story beyond read repair.)
+
+### 4.3 — Node-to-node transport
+- [ ] **Connection pooling** on the forward/replicate path (today each hop opens a fresh TCP connection — an obvious cost at high throughput and node count).
+- [ ] Evaluate **gRPC + Protobuf** for the inter-node boundary (from deferred) vs. the current framed TCP.
+
+### 4.4 — Horizontal gateways
+- [ ] Run **K stateless gateways behind a load balancer** (they're already JWT/stateless) to remove the single-gateway throughput ceiling. No sticky sessions.
+
+### 4.5 — Multi-host deploy + real scale benchmark
+- [ ] Deploy nodes **across hosts** (EKS + StatefulSets, or Swarm) rather than one box.
+- [ ] **Distributed load test** (k6 Cloud or multiple runners) producing a **scaling curve**: throughput vs node count and vs gateway count — the "heavier benchmarking" that only becomes meaningful once membership converges.
+
+**Definition of done:** a cluster of ≥~12 nodes across ≥2 hosts forms a *convergent* ring, survives node churn (join/kill/heal) with correct routing, hinted handoff keeps writes available through an owner outage, and a distributed benchmark shows throughput scaling as gateways are added — with the new node ceiling and its next bottleneck documented.
+
+**Write `docs/decisions/tier-4.md`.** Cover: why gossip/SWIM over the JOIN-only scheme; hinted handoff + anti-entropy vs read-repair-only; gRPC vs framed TCP; horizontal gateways + LB; and — honestly — what limits scale *after* these changes.
+
+**Honestly claimable:** horizontally scalable, gossip-based convergent membership, hinted handoff + anti-entropy, empirically-benchmarked scaling curve.
+
+---
+
 ## Deferred / future work
 
-Do not build these in the current scope. Named here so the roadmap is honest and interview-ready:
+Do not build these in the current scope. Named here so the roadmap is honest and interview-ready. *(Several of these — hinted handoff + Merkle anti-entropy, gRPC, and EKS/StatefulSets — are now scoped into **Tier 4** above, where they serve the concrete goal of horizontal scale rather than sitting as loose "someday" items.)*
 
-- Hinted handoff and Merkle-tree anti-entropy (complete the AP convergence story)
+- Hinted handoff and Merkle-tree anti-entropy (complete the AP convergence story) — *now Tier 4.2*
 - ELK stack for log search (Loki as the lighter alternative if pursued)
 - Distributed tracing with OpenTelemetry + Jaeger/Tempo
-- gRPC + Protobuf as the gateway↔cluster boundary
-- Kubernetes (EKS) with StatefulSets for the nodes
+- gRPC + Protobuf as the gateway↔cluster boundary — *evaluated in Tier 4.3*
+- Kubernetes (EKS) with StatefulSets for the nodes — *now Tier 4.5*
 - Terraform for infrastructure as code
 - SLOs / SLIs / error budgets
 - Managed RDS Postgres instead of container-Postgres
