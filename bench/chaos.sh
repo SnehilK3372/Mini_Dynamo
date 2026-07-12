@@ -16,7 +16,6 @@ export MSYS_NO_PATHCONV=1
 cd "$(dirname "$0")/.."
 
 GW=localhost:8080
-NET="${NET:-project_mini-dynamo_dhtnet}"
 NODE_PORTS=(9101 9102 9103)
 SEED=8
 FAILED=0
