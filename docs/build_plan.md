@@ -205,11 +205,11 @@ Do the four pieces in this order. Each depends on the previous one.
 
 **Goal:** Real numbers to back the availability thesis. Sonnet 5.
 
-- [ ] k6 script (`bench/load.js`): concurrent PUT/GET traffic, reports throughput and p50/p95/p99. Parameterized on N/W/R.
-- [ ] Chaos script (`bench/chaos.sh`): kill a node mid-load, wait, restart it. Assertions/logs prove reads still succeeded during the kill and that read-repair converged the replica after restart.
-- [ ] `bench/RESULTS.md`: recorded throughput and latency for `N=3, W=2, R=2` at a couple of concurrency levels; a note on chaos-test behavior. Include a Grafana screenshot if possible.
+- [x] k6 script (`bench/load.js`): concurrent PUT/GET traffic, reports throughput and p50/p95/p99. Parameterized on N/W/R. *(+ `bench/run.sh` wrapper.)*
+- [x] Chaos script (`bench/chaos.sh`): kill a node mid-load, wait, restart it. Assertions/logs prove reads still succeeded during the kill and that read-repair converged the replica after restart. *(CHAOS PASSED: 97.4% reads served, read_repair +6.)*
+- [x] `bench/RESULTS.md`: recorded throughput and latency for `N=3, W=2, R=2` at a couple of concurrency levels; a note on chaos-test behavior. Include a Grafana screenshot if possible. *(Real numbers recorded; Grafana screenshot skipped — optional, live dashboard at :3000.)*
 
-**Definition of done:** `bench/RESULTS.md` has real numbers; chaos script is runnable in one command.
+**Definition of done:** `bench/RESULTS.md` has real numbers; chaos script is runnable in one command. — **DONE.**
 
 **Write `docs/decisions/tier-2.md`.** Cover: why k6 over JMeter; what the numbers say about throughput vs quorum tightness (W=1 vs W=2).
 
