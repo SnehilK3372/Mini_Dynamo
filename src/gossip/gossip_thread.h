@@ -32,8 +32,7 @@ class GossipThread {
     using SendFn = std::function<std::string(const std::string &host, uint16_t port,
                                              const std::string &payload)>;
 
-    GossipThread(const NodeInfo &self, Router *router, SendFn send_fn,
-                 GossipConfig config = {});
+    GossipThread(const NodeInfo &self, Router *router, SendFn send_fn, GossipConfig config = {});
     ~GossipThread();
 
     // Start the gossip loop in a background thread.

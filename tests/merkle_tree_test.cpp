@@ -1,5 +1,6 @@
-#include "gtest/gtest.h"
 #include "antientropy/merkle_tree.h"
+
+#include "gtest/gtest.h"
 
 TEST(MerkleTreeTest, EmptyTreeHasZeroRoot) {
     MerkleTree tree;

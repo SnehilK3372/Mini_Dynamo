@@ -28,9 +28,7 @@ void HintStore::expireOld() {
     for (auto it = hints_.begin(); it != hints_.end();) {
         auto &list = it->second;
         list.erase(std::remove_if(list.begin(), list.end(),
-                                  [&](const Hint &h) {
-                                      return (now - h.created_at) > ttl_;
-                                  }),
+                                  [&](const Hint &h) { return (now - h.created_at) > ttl_; }),
                    list.end());
         if (list.empty()) {
             it = hints_.erase(it);

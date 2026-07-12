@@ -145,7 +145,7 @@ int main() {
 
     // deliver_fn: replicate a hinted value to the recovered node.
     auto deliver_fn = [&send_fn](const NodeInfo &target, const string &key,
-                                  const VersionedValue &value) -> bool {
+                                 const VersionedValue &value) -> bool {
         string payload = "REPLICATE|" + key + "|" + base64::encode(value.data) + "|hint|" +
                          value.clock.serialize();
         string resp = send_fn(target.host, target.port, payload);
@@ -165,17 +165,15 @@ int main() {
     // Inject hint store + liveness check into the coordinator (via the node's
     // public access). The coordinator uses these for sloppy quorum writes.
     node.setHintStore(&hint_store);
-    node.setLivenessCheck([&gossip](const string &node_id) -> bool {
-        return gossip.swim().isAlive(node_id);
-    });
+    node.setLivenessCheck(
+        [&gossip](const string &node_id) -> bool { return gossip.swim().isAlive(node_id); });
 
     jlog::msg("info", "hinted handoff started (TTL=" + to_string(hint_ttl) + "s)");
 
     // --- Anti-Entropy ---
     int ae_interval = stoi(getenv_str("ANTIENTROPY_INTERVAL_SECONDS", "300"));
 
-    auto exchange_fn = [&send_fn](const NodeInfo &peer,
-                                   const MerkleTree &ours) -> MerkleTree {
+    auto exchange_fn = [&send_fn](const NodeInfo &peer, const MerkleTree &ours) -> MerkleTree {
         (void)ours;
         // Simplified: in a full implementation, serialize the tree and exchange
         // with the peer over the wire. For now, anti-entropy relies on the pull-
@@ -185,21 +183,18 @@ int main() {
         return MerkleTree();
     };
 
-    auto pull_fn = [](const NodeInfo &, uint64_t, uint64_t)
-        -> vector<pair<string, VersionedValue>> {
-        return {};
-    };
+    auto pull_fn = [](const NodeInfo &, uint64_t,
+                      uint64_t) -> vector<pair<string, VersionedValue>> { return {}; };
 
     auto push_fn = [&send_fn](const NodeInfo &peer, const string &key,
-                               const VersionedValue &value) -> bool {
+                              const VersionedValue &value) -> bool {
         string payload = "REPLICATE|" + key + "|" + base64::encode(value.data) + "|ae|" +
                          value.clock.serialize();
         string resp = send_fn(peer.host, peer.port, payload);
         return resp.find("RESPONSE|OK") != string::npos;
     };
 
-    AntiEntropyThread antientropy(myInfo, &router, node.storage(),
-                                  exchange_fn, pull_fn, push_fn,
+    AntiEntropyThread antientropy(myInfo, &router, node.storage(), exchange_fn, pull_fn, push_fn,
                                   chrono::seconds(ae_interval));
     antientropy.start();
 

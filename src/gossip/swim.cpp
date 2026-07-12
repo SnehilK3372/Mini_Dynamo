@@ -6,9 +6,7 @@
 namespace gossip {
 
 Swim::Swim(const NodeInfo &self, int suspicion_mult)
-    : self_(self),
-      suspicion_mult_(suspicion_mult),
-      rng_(std::random_device{}()) {}
+    : self_(self), suspicion_mult_(suspicion_mult), rng_(std::random_device{}()) {}
 
 int Swim::disseminationLimit() const {
     // Each event is piggybacked on 3*ceil(log2(N+1)) outgoing messages, ensuring
@@ -220,8 +218,8 @@ std::vector<std::string> Swim::expireSuspects(std::chrono::milliseconds suspicio
     auto now = std::chrono::steady_clock::now();
     for (auto &[id, entry] : members_) {
         if (entry.state == MemberState::Suspect) {
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                now - entry.suspect_since);
+            auto elapsed =
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - entry.suspect_since);
             if (elapsed >= suspicion_timeout) {
                 entry.state = MemberState::Dead;
                 expired.push_back(id);

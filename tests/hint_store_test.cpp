@@ -1,8 +1,9 @@
+#include "hints/hint_store.h"
+
 #include <chrono>
 #include <thread>
 
 #include "gtest/gtest.h"
-#include "hints/hint_store.h"
 #include "vector_clock.h"
 #include "versioned_value.h"
 

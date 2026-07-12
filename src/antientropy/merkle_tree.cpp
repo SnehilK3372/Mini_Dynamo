@@ -23,18 +23,14 @@ void MerkleTree::build() {
     }
 }
 
-uint64_t MerkleTree::rootHash() const {
-    return nodes_.size() > 1 ? nodes_[1] : 0;
-}
+uint64_t MerkleTree::rootHash() const { return nodes_.size() > 1 ? nodes_[1] : 0; }
 
 uint64_t MerkleTree::nodeHash(size_t index) const {
     if (index >= nodes_.size()) return 0;
     return nodes_[index];
 }
 
-void MerkleTree::clear() {
-    std::fill(nodes_.begin(), nodes_.end(), 0);
-}
+void MerkleTree::clear() { std::fill(nodes_.begin(), nodes_.end(), 0); }
 
 std::vector<MerkleTree::DiffRange> MerkleTree::diff(const MerkleTree &a, const MerkleTree &b) {
     std::vector<DiffRange> result;

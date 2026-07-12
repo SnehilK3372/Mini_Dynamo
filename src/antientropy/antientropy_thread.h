@@ -26,9 +26,8 @@ class AntiEntropyThread {
 
     // pull_keys_fn: given a peer and a hash range, pulls all keys in that range
     // from the peer. Returns (key, VersionedValue) pairs.
-    using PullKeysFn =
-        std::function<std::vector<std::pair<std::string, VersionedValue>>(
-            const NodeInfo &peer, uint64_t range_start, uint64_t range_end)>;
+    using PullKeysFn = std::function<std::vector<std::pair<std::string, VersionedValue>>(
+        const NodeInfo &peer, uint64_t range_start, uint64_t range_end)>;
 
     // push_key_fn: push a local key to a peer (same as replica write).
     using PushKeyFn = std::function<bool(const NodeInfo &peer, const std::string &key,

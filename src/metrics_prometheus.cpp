@@ -70,9 +70,9 @@ PrometheusMetrics::PrometheusMetrics(const std::string &bind_address, const std:
                                     .Help("Hints stored for downed replica nodes")
                                     .Register(*registry_);
     auto &hints_delivered_family = BuildCounter()
-                                      .Name("minidynamo_hints_delivered_total")
-                                      .Help("Hints successfully delivered on node recovery")
-                                      .Register(*registry_);
+                                       .Name("minidynamo_hints_delivered_total")
+                                       .Help("Hints successfully delivered on node recovery")
+                                       .Register(*registry_);
     auto &ae_syncs_family = BuildCounter()
                                 .Name("minidynamo_antientropy_syncs_total")
                                 .Help("Anti-entropy Merkle sync rounds completed")

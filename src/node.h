@@ -38,7 +38,9 @@ class Node {
     // Inject hint store + liveness check for sloppy quorum (called from main
     // once gossip is ready).
     void setHintStore(HintStore *store) { coordinator_->setHintStore(store); }
-    void setLivenessCheck(Coordinator::IsAliveFn fn) { coordinator_->setLivenessCheck(std::move(fn)); }
+    void setLivenessCheck(Coordinator::IsAliveFn fn) {
+        coordinator_->setLivenessCheck(std::move(fn));
+    }
 
     // Access to the underlying storage (needed by anti-entropy thread to iterate keys).
     StorageEngine *storage() const { return storage_.get(); }
