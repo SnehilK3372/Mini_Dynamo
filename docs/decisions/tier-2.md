@@ -76,3 +76,40 @@ you can buy throughput and tail-latency headroom with durability, per request.
   harder on the replication fan-out and show the W knob's cost more sharply.
 - **No warm-up/tuning.** RocksDB caches, JIT warm-up, and connection pools aren't pre-warmed;
   these are cold-ish steady-state numbers, not a tuned peak.
+
+## Scaling limits: how far can this actually go?
+
+"3 nodes feels small" is a fair reaction, so here is the honest ceiling. "Heavier" splits into
+two very different questions:
+
+**More client load (higher req/s).** Feasible now — the bottleneck in these runs was the *host*
+(three nodes + gateway + Postgres + Prometheus contending for one laptop under Docker Desktop),
+not the design. On real hardware with a distributed load generator (k6 Cloud or several k6
+runners) the same cluster posts higher, cleaner numbers. The hard ceiling on client throughput is
+the **single gateway** (one JVM/Tomcat), independent of node count.
+
+**More nodes (tens, hundreds, 1000+).** *Not* possible with the system as built — and this is an
+architecture limit, not a benchmark one. The blocker is **membership**:
+
+- Membership is learned **only at JOIN**; there is no gossip. A joiner contacts the single
+  bootstrap, gets a snapshot of the ring *as the bootstrap knows it at that instant*, and stops.
+- So **ring views diverge and only the bootstrap is ever complete.** `node2` learns `{node1}` and
+  never learns `node3`, `node4`, … that join later. This is real even at N=3: `node2`'s ring is
+  missing `node3`. The cluster routes correctly today only because the gateway hits `node1` (the
+  bootstrap, full ring) first and it coordinates — a non-bootstrap coordinator can misroute.
+- There is **no dead-node removal, no rebalancing, and no anti-entropy** (Merkle trees are named
+  future work); the single bootstrap is also a join serialization point and a SPOF.
+
+**Realistic ceiling as-is:** ~3–7 nodes for correct routing (bounded by "only the bootstrap has
+the full ring"), with client throughput capped by the single gateway. Benchmarking at 1000 nodes
+would be measuring a cluster that cannot correctly *form*, so it isn't a meaningful test — the
+prerequisite is convergent membership.
+
+**What unlocks real scale** (sketched as **Tier 4** in `docs/build_plan.md`): gossip/SWIM
+membership so every node converges on the full ring and detects failures (the load-bearing
+change), then hinted handoff + Merkle anti-entropy, node-to-node connection pooling, and
+horizontal gateways behind a load balancer — deployed across hosts (EKS/StatefulSets), with a
+distributed load test to prove the scaling curve. For a portfolio, being able to *state* this
+limit and its fix is worth more than brute-forcing node count: the Dynamo principles (tunable
+quorums, vector clocks, read repair, availability under failure) are already demonstrated with
+real numbers at 3–5 nodes.
