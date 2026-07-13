@@ -57,6 +57,46 @@ install_docker() {
   sudo usermod -aG docker "$USER" || true
 }
 
+# --- buildx (compose build needs >= 0.17.0) ------------------------------------
+# Amazon Linux 2023's `dnf install docker` bundles an old buildx plugin (often
+# 0.11-0.14) even on an already-installed Docker, so this runs unconditionally
+# (not gated behind install_docker's early-return) and upgrades in place if the
+# bundled version is too old for `docker compose build`'s bake-based invocation.
+ensure_buildx() {
+  local have="" plugin_dir cli_dir="$HOME/.docker/cli-plugins"
+  if command -v docker >/dev/null 2>&1; then
+    have="$(docker buildx version 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1 | tr -d v)"
+  fi
+  # sort -C -V exits 0 iff its input is already in ascending version order, so
+  # printing the floor first and checking that order holds is how we test
+  # "have >= floor" without a real version-compare builtin.
+  if [ -n "$have" ] && printf '0.17.0\n%s\n' "$have" | sort -C -V; then
+    log "buildx $have already >= 0.17.0"
+    return
+  fi
+  log "Upgrading buildx (found: ${have:-none}, need >= 0.17.0)"
+  if [ -f /etc/os-release ]; then . /etc/os-release; fi
+  case "${ID:-}" in
+    amzn) plugin_dir="/usr/libexec/docker/cli-plugins" ;;
+    ubuntu|debian) plugin_dir="/usr/lib/docker/cli-plugins" ;;
+    *) plugin_dir="$cli_dir" ;;  # unknown OS: fall back to a user-local install (no sudo needed)
+  esac
+  local tag
+  tag="$(curl -fsSL https://api.github.com/repos/docker/buildx/releases/latest \
+    | grep -oE '"tag_name": *"[^"]+"' | head -1 | grep -oE 'v[0-9.]+')"
+  local url="https://github.com/docker/buildx/releases/download/${tag}/buildx-${tag}.linux-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+  if [ "$plugin_dir" = "$cli_dir" ]; then
+    mkdir -p "$cli_dir"
+    curl -fsSL "$url" -o "$cli_dir/docker-buildx"
+    chmod +x "$cli_dir/docker-buildx"
+  else
+    sudo mkdir -p "$plugin_dir"
+    sudo curl -fsSL "$url" -o "$plugin_dir/docker-buildx"
+    sudo chmod +x "$plugin_dir/docker-buildx"
+  fi
+  log "buildx now: $(docker buildx version 2>/dev/null || echo 'unknown — re-check after login/newgrp')"
+}
+
 # --- Repo + stack -------------------------------------------------------------
 fetch_repo() {
   if [ -d "$REPO_DIR/.git" ]; then
@@ -104,6 +144,7 @@ check_memory() {
 command -v git >/dev/null 2>&1 || { sudo dnf -y install git 2>/dev/null || sudo apt-get install -y git; }
 check_memory
 install_docker
+ensure_buildx
 fetch_repo
 seed_env
 bring_up

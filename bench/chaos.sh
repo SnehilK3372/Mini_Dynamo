@@ -19,6 +19,11 @@ GW=localhost:8080
 NODE_PORTS=(9101 9102 9103)
 SEED=8
 FAILED=0
+# Must match the gateway's real AUTH_USERNAME/AUTH_PASSWORD (.env on the box) —
+# defaults only work if you left them at the docker-compose.yml fallback values.
+# Exported so the background bench/run.sh k6 invocation picks them up too.
+: "${AUTH_USER:=admin}"; : "${AUTH_PASS:=changeme}"
+export AUTH_USER AUTH_PASS
 log(){ printf '\n=== %s ===\n' "$*"; }
 ok(){ printf 'PASS: %s\n' "$*"; }
 bad(){ printf 'FAIL: %s\n' "$*"; FAILED=1; }
@@ -42,17 +47,34 @@ for i in $(seq 1 60); do
   curl -sf "$GW/actuator/health" 2>/dev/null | grep -q '"status":"UP"' && break
   sleep 2; [ "$i" = 60 ] && { echo "gateway never healthy"; exit 1; }
 done
-TOKEN=$(curl -s -X POST "$GW/v1/auth/token" -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"changeme"}' | sed -E 's/.*"token":"([^"]+)".*/\1/')
-[ -n "$TOKEN" ] && ok "authenticated" || { echo "no token"; exit 1; }
+AUTH_RESP=$(curl -s -w '\n%{http_code}' -X POST "$GW/v1/auth/token" -H 'Content-Type: application/json' \
+  -d "{\"username\":\"${AUTH_USER}\",\"password\":\"${AUTH_PASS}\"}")
+AUTH_CODE=$(echo "$AUTH_RESP" | tail -n1)
+AUTH_BODY=$(echo "$AUTH_RESP" | sed '$d')
+# Validate on HTTP status, not just "sed produced non-empty output" — sed leaves
+# its input unchanged on a no-match, so a 401 error body would otherwise be
+# silently accepted as a "token" and every subsequent call would 401 unnoticed.
+if [ "$AUTH_CODE" != "200" ]; then
+  bad "auth failed (HTTP $AUTH_CODE) — check AUTH_USER/AUTH_PASS match the gateway's .env"
+  echo "response: $AUTH_BODY"
+  exit 1
+fi
+TOKEN=$(echo "$AUTH_BODY" | sed -E 's/.*"token":"([^"]+)".*/\1/')
+[ -n "$TOKEN" ] && [ "$TOKEN" != "$AUTH_BODY" ] && ok "authenticated" || { bad "200 response had no token field"; exit 1; }
 AUTH=(-H "Authorization: Bearer $TOKEN")
 
 log "seed $SEED keys (all nodes up)"
+seeded=0
 for i in $(seq 1 $SEED); do
-  curl -s "${AUTH[@]}" -H 'Content-Type: application/json' \
-    -d "{\"value\":\"seed-$i\"}" -X PUT "$GW/v1/kv/chaos-$i?W=2" >/dev/null
+  code=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" -H 'Content-Type: application/json' \
+    -d "{\"value\":\"seed-$i\"}" -X PUT "$GW/v1/kv/chaos-$i?W=2")
+  [ "$code" = "200" ] && seeded=$((seeded + 1)) || echo "  chaos-$i seed -> $code"
 done
-ok "seeded"
+if [ "$seeded" = "$SEED" ]; then
+  ok "seeded ($seeded/$SEED)"
+else
+  bad "only seeded $seeded/$SEED keys — check auth/quorum before trusting the rest of this run"
+fi
 
 # Baseline the cumulative repair counter BEFORE the fault. Repairs can fire the
 # moment node2 is back — the background R=2 load itself heals it as it reads — so

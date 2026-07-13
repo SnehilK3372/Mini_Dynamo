@@ -120,11 +120,26 @@ Both scripts run k6 as a container on the compose network, so they must run on
 the EC2 host. The network name is auto-detected (override with `NET=...` only if
 you have several `*_dhtnet` networks).
 
+> **Credentials — the #1 cause of a failed run.** The scripts default to
+> `admin`/`changeme`, which only works if you left `AUTH_PASSWORD` at its
+> compose fallback. If you set a real password in `.env` (step 3), you **must**
+> pass it via `AUTH_PASS` (and `AUTH_USER` if you changed the username) or every
+> request 401s. Export it once so every command below inherits it:
+>
+> ```bash
+> export AUTH_PASS="$(grep -oP '^AUTH_PASSWORD=\K.*' ~/Mini_Dynamo/.env)"
+> # sanity check — expect 200:
+> curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8080/v1/auth/token \
+>   -H 'Content-Type: application/json' \
+>   -d "{\"username\":\"admin\",\"password\":\"$AUTH_PASS\"}"
+> ```
+
 ```bash
 cd ~/Mini_Dynamo
 
-# Load: defaults N=3 W=2 R=2, 10 VUs, 30s, 30% writes.
-AUTH_PASS='<AUTH_PASSWORD>' bench/run.sh baseline
+# Load: defaults N=3 W=2 R=2, 10 VUs, 30s, 30% writes. (AUTH_PASS inherited from
+# the export above.)
+bench/run.sh baseline
 
 # Sweeps (env tunables: N W R VUS DURATION WRITE_RATIO KEYSPACE)
 VUS=50 DURATION=60s bench/run.sh heavy
@@ -199,8 +214,9 @@ docker compose down    # stop stack, keep the box
 
 | Symptom | Check |
 |---------|-------|
+| `compose build requires buildx 0.17.0 or later` | Amazon Linux's packaged Docker bundles an old buildx even when Docker itself is already installed. `bootstrap.sh` now upgrades it automatically; on an already-bootstrapped box, re-run `deploy/aws/bootstrap.sh` or manually drop a fresh `docker-buildx` binary into `/usr/libexec/docker/cli-plugins/` (Amazon Linux) or `/usr/lib/docker/cli-plugins/` (Ubuntu/Debian) from the [buildx releases page](https://github.com/docker/buildx/releases), then `chmod +x` it |
 | Node won't start / OOM | `docker compose logs node1`; confirm 8 GB, `free -h` |
-| k6 "network not found" | `docker network ls \| grep dhtnet`, export the right `NET` |
+| k6 "network not found" | `docker network ls \| grep dhtnet` — `bench/run.sh` auto-detects this now; only needed if you have multiple `*_dhtnet` networks |
 | k6 all 401 | wrong `AUTH_PASS` — must match `.env` `AUTH_PASSWORD` |
 | Prometheus target DOWN | `curl localhost:9101/metrics` on the box |
 | Disk full mid-build | `df -h`; prometheus-cpp build needs ≥30 GB headroom |
