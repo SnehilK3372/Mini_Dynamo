@@ -23,6 +23,8 @@ add_library(kv_core STATIC
     src/hints/handoff_thread.cpp
     src/antientropy/merkle_tree.cpp
     src/antientropy/antientropy_thread.cpp
+    src/net/thread_pool.cpp
+    src/net/connection_pool.cpp
 )
 target_include_directories(kv_core PUBLIC src)
 target_link_libraries(kv_core PUBLIC Threads::Threads)
@@ -76,8 +78,10 @@ if(UNIX)
         src/log.cpp
         src/net/tcp_server.cpp
         src/net/tcp_client.cpp
+        src/net/tcp_connect.cpp
         src/net/framing.cpp
         src/net/tcp_replica_client.cpp
+        src/net/pooled_replica_client.cpp
         src/gossip/gossip_thread.cpp
     )
     if(HAVE_ROCKSDB)

@@ -288,6 +288,16 @@ GetResult Coordinator::coordinateGet(const string &key, int N, int R) {
                 r.vv = VersionedValue::deserialize(*stored);
             }
             q->responses.push_back(r);  // local read always counts as a response
+        } else if (is_alive_fn_ && !is_alive_fn_(owner.node_id)) {
+            // Liveness-aware fan-out: a replica gossip has confirmed dead would
+            // only ever time out, and each such read blocks a background thread
+            // for the full quorum deadline — under load that thread/CPU pressure
+            // is enough to push the *live* replicas past the deadline too, failing
+            // reads that should have succeeded. Skip it. With N=3 and one dead
+            // owner, the local read + the one live remote still meet R=2. If too
+            // many owners are dead to reach R, the read fails fast below with
+            // quorum_not_met, which is the honest outcome (better than stalling).
+            continue;
         } else {
             remotes.push_back(owner);
         }

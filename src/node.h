@@ -25,9 +25,12 @@ class Node {
     // Storage and Metrics are injected: RocksDB + PrometheusMetrics in production,
     // in-memory versions for a memory-only build/tests. Passing a null Metrics
     // selects InMemoryMetrics, so existing call sites (and tests) keep working
-    // without a Prometheus dependency.
+    // without a Prometheus dependency. `replicas` is likewise injectable — null
+    // falls back to the one-shot TcpReplicaClient; main injects a pooled client
+    // (Tier 4.3) so the coordinator's fan-out reuses connections.
     Node(const NodeInfo &info, Router *router, unique_ptr<StorageEngine> storage,
-         unique_ptr<Metrics> metrics = nullptr, QuorumConfig cfg = {});
+         unique_ptr<Metrics> metrics = nullptr, QuorumConfig cfg = {},
+         unique_ptr<ReplicaClient> replicas = nullptr);
 
     // Handle one framed request payload; write a framed response to client_fd.
     void handleRequest(const string &payload, int client_fd);

@@ -1,3 +1,5 @@
+#include <unistd.h>
+
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
@@ -13,7 +15,10 @@
 #include "hints/hint_store.h"
 #include "log.h"
 #include "metrics.h"
+#include "net/connection_pool.h"
+#include "net/pooled_replica_client.h"
 #include "net/tcp_client.h"
+#include "net/tcp_connect.h"
 #include "net/tcp_server.h"
 #include "node.h"
 #include "router.h"
@@ -103,15 +108,41 @@ int main() {
     int vnodes = stoi(getenv_str("VNODES", "128"));
     Router router(vnodes);
     NodeInfo myInfo(node_id, advertise_host, port);
-    Node node(myInfo, &router, makeStorage(node_id), makeMetrics(node_id));
+
+    // Metrics is owned by the Node, but the connection pool needs to report into
+    // it too — grab a borrowed pointer before handing ownership over. Valid for
+    // the whole process, since the Node lives until exit.
+    auto metrics = makeMetrics(node_id);
+    Metrics *metrics_ptr = metrics.get();
+
+    // Connection pool (Tier 4.3): reuse persistent per-peer sockets for the
+    // coordinator's replica fan-out instead of one connect/close per call. POSIX
+    // dial/close are injected so the pool itself stays transport-agnostic. The
+    // pool must outlive the Node (declared first → destroyed last).
+    size_t pool_max = static_cast<size_t>(stoi(getenv_str("POOL_MAX_CONNS_PER_PEER", "4")));
+    int pool_reap_s = stoi(getenv_str("POOL_IDLE_REAP_SECONDS", "60"));
+    ConnectionPool conn_pool(
+        [](const string &h, uint16_t p, chrono::milliseconds t) {
+            int ms = static_cast<int>(t.count());
+            return tcpconnect::dial(h, static_cast<int>(p), ms, ms);
+        },
+        [](int fd) { ::close(fd); }, pool_max, chrono::seconds(pool_reap_s));
+    conn_pool.setCounters([metrics_ptr] { metrics_ptr->incPoolConnectionCreated(); },
+                          [metrics_ptr] { metrics_ptr->incPoolConnectionReused(); });
+
+    auto pooled_replicas = make_unique<PooledReplicaClient>(&conn_pool, node_id);
+    Node node(myInfo, &router, makeStorage(node_id), move(metrics), QuorumConfig{},
+              move(pooled_replicas));
 
     router.addPhysicalNode(myInfo);
 
-    TCPServer server(host, port, &node);
+    size_t workers = static_cast<size_t>(stoi(getenv_str("WORKER_THREADS", "64")));
+    TCPServer server(host, port, &node, workers);
     thread serverThread([&server]() { server.start(); });
     serverThread.detach();
 
-    jlog::msg("info", "TCP server listening on " + host + ":" + to_string(port));
+    jlog::msg("info", "TCP server listening on " + host + ":" + to_string(port) + " (workers=" +
+                          to_string(workers) + ", pool_max=" + to_string(pool_max) + ")");
 
     // The send function used by the gossip thread — wraps TCPClient for framed
     // request/response over a fresh connection (connection pooling is Tier 4.3).
