@@ -120,11 +120,26 @@ Both scripts run k6 as a container on the compose network, so they must run on
 the EC2 host. The network name is auto-detected (override with `NET=...` only if
 you have several `*_dhtnet` networks).
 
+> **Credentials — the #1 cause of a failed run.** The scripts default to
+> `admin`/`changeme`, which only works if you left `AUTH_PASSWORD` at its
+> compose fallback. If you set a real password in `.env` (step 3), you **must**
+> pass it via `AUTH_PASS` (and `AUTH_USER` if you changed the username) or every
+> request 401s. Export it once so every command below inherits it:
+>
+> ```bash
+> export AUTH_PASS="$(grep -oP '^AUTH_PASSWORD=\K.*' ~/Mini_Dynamo/.env)"
+> # sanity check — expect 200:
+> curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8080/v1/auth/token \
+>   -H 'Content-Type: application/json' \
+>   -d "{\"username\":\"admin\",\"password\":\"$AUTH_PASS\"}"
+> ```
+
 ```bash
 cd ~/Mini_Dynamo
 
-# Load: defaults N=3 W=2 R=2, 10 VUs, 30s, 30% writes.
-AUTH_PASS='<AUTH_PASSWORD>' bench/run.sh baseline
+# Load: defaults N=3 W=2 R=2, 10 VUs, 30s, 30% writes. (AUTH_PASS inherited from
+# the export above.)
+bench/run.sh baseline
 
 # Sweeps (env tunables: N W R VUS DURATION WRITE_RATIO KEYSPACE)
 VUS=50 DURATION=60s bench/run.sh heavy
