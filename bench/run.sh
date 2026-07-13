@@ -15,7 +15,7 @@ cd "$(dirname "$0")/.."
 # The compose network is named "<project>_dhtnet", and the project name derives
 # from the checkout directory — so it's "project_mini-dynamo_dhtnet" on the dev
 # box but "mini_dynamo_dhtnet" on an EC2 clone. Auto-detect it (override with
-# NET=... if you happen to have several *_dhtnet networks).
+# NET=... if you have several *_dhtnet networks).
 if [ -z "${NET:-}" ]; then
   NET="$(docker network ls --format '{{.Name}}' | grep -m1 dhtnet || true)"
 fi
@@ -23,11 +23,15 @@ fi
 LABEL="${1:-load}"
 : "${N:=3}"; : "${W:=2}"; : "${R:=2}"; : "${VUS:=10}"; : "${DURATION:=30s}"; : "${WRITE_RATIO:=0.3}"
 : "${KEYPREFIX:=load}"; : "${KEYSPACE:=200}"
+# Must match the gateway's real AUTH_USERNAME/AUTH_PASSWORD (.env on the box) —
+# defaults only work if you left them at the docker-compose.yml fallback values.
+: "${AUTH_USER:=admin}"; : "${AUTH_PASS:=changeme}"
 
 echo "=== k6 profile: ${LABEL}  (N=${N} W=${W} R=${R}, VUS=${VUS}, ${DURATION}, write=${WRITE_RATIO}) ==="
 docker run --rm -i --network "${NET}" \
   -e N="${N}" -e W="${W}" -e R="${R}" \
   -e VUS="${VUS}" -e DURATION="${DURATION}" -e WRITE_RATIO="${WRITE_RATIO}" \
   -e KEYPREFIX="${KEYPREFIX}" -e KEYSPACE="${KEYSPACE}" \
+  -e AUTH_USER="${AUTH_USER}" -e AUTH_PASS="${AUTH_PASS}" \
   -e BASE_URL="http://gateway:8080" \
   grafana/k6 run - < bench/load.js
