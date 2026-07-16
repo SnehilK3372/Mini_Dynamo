@@ -9,29 +9,34 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Deque;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedDeque;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
  * Speaks the C++ cluster's TCP wire protocol from Java. This is the entire
- * gateway&harr;cluster boundary (build-plan 1B.5): length-prefixed framing
- * (matches {@code src/net/framing.cpp}), base64-encoded values (matches {@code
- * src/base64.cpp}), pipe-delimited fields.
+ * gateway&harr;cluster boundary: length-prefixed framing (matches {@code
+ * src/net/framing.cpp}), base64-encoded values (matches {@code src/base64.cpp}),
+ * pipe-delimited fields.
  *
- * <p>A fresh socket is opened per request (no pooling — simple and correct for
- * this scope) and the configured nodes are tried in order, failing over on a
- * connection error. Any node can coordinate a request, so which one we reach
- * does not affect correctness.
+ * <p>Ring-aware routing (Tier 4.4): for a keyed op the client asks {@link
+ * RingRouter} for the key's owners and tries the primary first, then the other
+ * owners, then any remaining seed node as a last-resort failover. This sends the
+ * request straight to the coordinating node instead of always hitting the first
+ * seed (which funnelled all coordination onto one node). Correctness never
+ * depends on routing accuracy: whichever node receives the request coordinates
+ * against its own ring, so a stale/empty client ring only costs a forward hop.
  *
- * <p>Wire messages produced here:
- * <pre>
- *   PUT|key|b64value|origin|N|W|R|clock   -> RESPONSE|OK|clock | RESPONSE|ERROR|reason
- *   GET|key|origin|N|R                     -> RESPONSE|OK|b64|clock | RESPONSE|SIBLINGS|n|b64|clock... | RESPONSE|NOTFOUND | RESPONSE|ERROR|reason
- *   DELETE|key|origin|N|W|clock            -> RESPONSE|OK|clock | RESPONSE|ERROR|reason
- *   RING|origin                            -> RING\n&lt;count&gt;\n id|host|port\n...
- * </pre>
+ * <p>Connections are pooled per node (Tier 4.4): a healthy socket is returned for
+ * reuse after each exchange; a socket that errors is discarded and the exchange
+ * retried once on a fresh one (half-open handling).
  */
 @Component
 public class ClusterClient {
@@ -41,9 +46,15 @@ public class ClusterClient {
     private static final int MAX_FRAME = 64 * 1024 * 1024;  // mirrors framing.h kMaxFrame guard
 
     private final ClusterProperties props;
+    private final RingRouter ringRouter;
 
-    public ClusterClient(ClusterProperties props) {
+    // Per-endpoint ("host:port") pool of idle sockets. Bounded on checkin by
+    // maxConnectionsPerNode; surplus sockets are closed rather than hoarded.
+    private final Map<String, Deque<Socket>> pools = new ConcurrentHashMap<>();
+
+    public ClusterClient(ClusterProperties props, RingRouter ringRouter) {
         this.props = props;
+        this.ringRouter = ringRouter;
     }
 
     // ---- Public operations --------------------------------------------------
@@ -51,24 +62,24 @@ public class ClusterClient {
     public WriteResult put(String key, byte[] value, String clock, int n, int w, int r) {
         String payload = String.join("|", "PUT", key, b64(value), ORIGIN,
                 Integer.toString(n), Integer.toString(w), Integer.toString(r), nz(clock));
-        return parseWrite(exchange(payload));
+        return parseWrite(exchangeForKey(key, payload, n));
     }
 
     public WriteResult delete(String key, String clock, int n, int w) {
         String payload = String.join("|", "DELETE", key, ORIGIN,
                 Integer.toString(n), Integer.toString(w), nz(clock));
-        return parseWrite(exchange(payload));
+        return parseWrite(exchangeForKey(key, payload, n));
     }
 
     public ReadResult get(String key, int n, int r) {
         String payload = String.join("|", "GET", key, ORIGIN,
                 Integer.toString(n), Integer.toString(r));
-        return parseRead(exchange(payload));
+        return parseRead(exchangeForKey(key, payload, n));
     }
 
     public List<RingNode> ring() {
-        String resp = exchange("RING|" + ORIGIN);
-        return parseRing(resp);
+        // No key to hash — the RING snapshot can come from any node.
+        return parseRing(exchangeAny("RING|" + ORIGIN));
     }
 
     // ---- Response parsing ---------------------------------------------------
@@ -134,25 +145,135 @@ public class ClusterClient {
         return "quorum_not_met".equals(reason) || "no_nodes_in_ring".equals(reason);
     }
 
-    // ---- Transport: framed request/response with node failover --------------
+    // ---- Transport: ring-aware target selection + pooled failover -----------
 
-    private String exchange(String payload) {
+    /** A resolved target endpoint. */
+    private record Endpoint(String host, int port) {
+        String key() {
+            return host + ":" + port;
+        }
+    }
+
+    /**
+     * Ordered targets for a keyed op: the key's ring owners first (primary →
+     * secondaries), then any seed node not already covered as a fallback. Before
+     * the first ring poll the router is empty, so this is just the seed list —
+     * exactly the pre-4.4 behaviour.
+     */
+    private List<Endpoint> targetsForKey(String key, int n) {
+        List<Endpoint> out = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        for (RingNode owner : ringRouter.ownersFor(key, n)) {
+            Endpoint e = new Endpoint(owner.host(), owner.port());
+            if (seen.add(e.key())) out.add(e);
+        }
+        for (Endpoint e : seedEndpoints()) {
+            if (seen.add(e.key())) out.add(e);
+        }
+        return out;
+    }
+
+    private List<Endpoint> seedEndpoints() {
+        List<Endpoint> out = new ArrayList<>();
+        for (String ep : props.getNodes()) {
+            int c = ep.lastIndexOf(':');
+            out.add(new Endpoint(ep.substring(0, c), Integer.parseInt(ep.substring(c + 1))));
+        }
+        return out;
+    }
+
+    private String exchangeForKey(String key, String payload, int n) {
+        return exchange(targetsForKey(key, n), payload);
+    }
+
+    private String exchangeAny(String payload) {
+        return exchange(seedEndpoints(), payload);
+    }
+
+    private String exchange(List<Endpoint> targets, String payload) {
         IOException last = null;
-        for (String endpoint : props.getNodes()) {
-            String host = endpoint.substring(0, endpoint.lastIndexOf(':'));
-            int port = Integer.parseInt(endpoint.substring(endpoint.lastIndexOf(':') + 1));
-            try (Socket s = new Socket()) {
-                s.connect(new InetSocketAddress(host, port), props.getConnectTimeoutMs());
-                s.setSoTimeout(props.getReadTimeoutMs());
-                sendFramed(s.getOutputStream(), payload);
-                return recvFramed(s.getInputStream());
-            } catch (IOException e) {
-                last = e;
-                log.warn("cluster node {} unreachable: {}", endpoint, e.toString());
+        for (Endpoint e : targets) {
+            try {
+                return roundTripPooled(e, payload);
+            } catch (IOException ex) {
+                last = ex;
+                log.warn("cluster node {} unreachable: {}", e.key(), ex.toString());
             }
         }
         throw new ClusterUnavailableException("no cluster node reachable", last);
     }
+
+    /**
+     * One framed exchange with {@code e}, reusing a pooled socket if one is
+     * available. A pooled socket that fails (half-open: the peer closed it while
+     * it sat idle) is discarded and the exchange retried once on a fresh socket.
+     * Throws IOException only when a *fresh* connection also fails — i.e. the node
+     * is genuinely unreachable — so the caller fails over to the next target.
+     */
+    private String roundTripPooled(Endpoint e, String payload) throws IOException {
+        Socket pooled = pollPooled(e);
+        if (pooled != null) {
+            try {
+                String reply = roundTrip(pooled, payload);
+                checkin(e, pooled);  // healthy → return for reuse
+                return reply;
+            } catch (IOException stale) {
+                closeQuietly(pooled);  // desynced/half-open → never re-pool
+            }
+        }
+        Socket fresh = dial(e);  // may throw → node unreachable, propagate to failover
+        try {
+            String reply = roundTrip(fresh, payload);
+            checkin(e, fresh);
+            return reply;
+        } catch (IOException ex) {
+            closeQuietly(fresh);
+            throw ex;
+        }
+    }
+
+    private static String roundTrip(Socket s, String payload) throws IOException {
+        sendFramed(s.getOutputStream(), payload);
+        return recvFramed(s.getInputStream());
+    }
+
+    private Socket dial(Endpoint e) throws IOException {
+        Socket s = new Socket();
+        s.connect(new InetSocketAddress(e.host(), e.port()), props.getConnectTimeoutMs());
+        s.setSoTimeout(props.getReadTimeoutMs());
+        return s;
+    }
+
+    private Socket pollPooled(Endpoint e) {
+        Deque<Socket> dq = pools.get(e.key());
+        if (dq == null) return null;
+        Socket s;
+        while ((s = dq.pollFirst()) != null) {
+            if (!s.isClosed()) return s;  // best-effort liveness; real check is the round trip
+            closeQuietly(s);
+        }
+        return null;
+    }
+
+    private void checkin(Endpoint e, Socket s) {
+        Deque<Socket> dq = pools.computeIfAbsent(e.key(), k -> new ConcurrentLinkedDeque<>());
+        if (dq.size() < props.getMaxConnectionsPerNode()) {
+            dq.offerFirst(s);  // LIFO: keep a small warm set, let the rest be created on demand
+        } else {
+            closeQuietly(s);
+        }
+    }
+
+    private static void closeQuietly(Socket s) {
+        if (s == null) return;
+        try {
+            s.close();
+        } catch (IOException ignored) {
+            // closing a broken socket; nothing to do
+        }
+    }
+
+    // ---- Framing (unchanged wire codec) -------------------------------------
 
     private static void sendFramed(OutputStream out, String payload) throws IOException {
         byte[] body = payload.getBytes(StandardCharsets.UTF_8);

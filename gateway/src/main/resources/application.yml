@@ -40,11 +40,17 @@ management:
       percentiles-histogram:
         http.server.requests: true
 
-# Where the C++ cluster lives and how patiently to talk to it.
+# Where the C++ cluster lives and how patiently to talk to it. `nodes` is the seed
+# list (used before ring discovery and as the routing fallback).
 cluster:
   nodes: ${CLUSTER_NODES:localhost:5001,localhost:5002,localhost:5003}
   connect-timeout-ms: ${CLUSTER_CONNECT_TIMEOUT_MS:1000}
   read-timeout-ms: ${CLUSTER_READ_TIMEOUT_MS:2000}
+  # Ring-aware routing (Tier 4.4). virtual-nodes MUST equal the C++ node VNODES
+  # (default 128) or the client ring won't line up and routing falls back to a hop.
+  virtual-nodes: ${CLUSTER_VNODES:128}
+  ring-poll-interval-ms: ${CLUSTER_RING_POLL_MS:5000}
+  max-connections-per-node: ${CLUSTER_MAX_CONNS_PER_NODE:4}
 
 # JWT signing. The secret MUST be provided via env in any real deployment; the
 # default here is an obvious dev-only placeholder (and is long enough for HS256).

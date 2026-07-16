@@ -3,6 +3,7 @@ package com.minidynamo.gateway;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * Entry point for the Mini Dynamo gateway: a stateless Spring Boot service that
@@ -13,6 +14,7 @@ import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
  */
 @SpringBootApplication
 @ConfigurationPropertiesScan  // registers the @ConfigurationProperties beans (cluster/jwt/auth)
+@EnableScheduling  // drives RingPoller's periodic ring refresh
 public class GatewayApplication {
     public static void main(String[] args) {
         SpringApplication.run(GatewayApplication.class, args);

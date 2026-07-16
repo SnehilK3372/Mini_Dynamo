@@ -21,7 +21,9 @@ class ClusterClientTest {
     private ClusterClient clientFor(FakeClusterServer server) {
         ClusterProperties props = new ClusterProperties();
         props.setNodes(List.of(server.endpoint()));
-        return new ClusterClient(props);
+        // Empty ring (never rebuilt) → routing falls back to the seed list, which
+        // is exactly what these wire-codec tests exercise.
+        return new ClusterClient(props, new RingRouter(128));
     }
 
     @Test
@@ -110,7 +112,7 @@ class ClusterClientTest {
             // First endpoint is a dead port; client should fail over to the good one.
             props.setNodes(List.of("localhost:1", good.endpoint()));
             props.setConnectTimeoutMs(300);
-            ClusterClient client = new ClusterClient(props);
+            ClusterClient client = new ClusterClient(props, new RingRouter(128));
             assertThat(client.put("k", new byte[0], null, 3, 2, 2).status())
                     .isEqualTo(WriteResult.Status.OK);
         }
@@ -121,7 +123,7 @@ class ClusterClientTest {
         ClusterProperties props = new ClusterProperties();
         props.setNodes(List.of("localhost:1"));
         props.setConnectTimeoutMs(300);
-        ClusterClient client = new ClusterClient(props);
+        ClusterClient client = new ClusterClient(props, new RingRouter(128));
         assertThatThrownBy(() -> client.get("k", 3, 2))
                 .isInstanceOf(ClusterUnavailableException.class);
     }

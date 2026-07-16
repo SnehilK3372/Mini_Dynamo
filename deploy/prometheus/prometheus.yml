@@ -10,8 +10,15 @@ global:
 scrape_configs:
   - job_name: gateway
     metrics_path: /actuator/prometheus
-    static_configs:
-      - targets: ['gateway:8080']
+    # The gateway is scaled to multiple replicas behind nginx (Tier 4.4). A single
+    # static target would only ever scrape one replica, so discover every replica's
+    # IP via Docker's DNS (an A-record lookup of the compose service name returns
+    # all task IPs). Each replica is scraped and labelled by its instance IP.
+    dns_sd_configs:
+      - names: ['gateway']
+        type: A
+        port: 8080
+        refresh_interval: 10s
 
   - job_name: mini-dynamo-nodes
     metrics_path: /metrics
