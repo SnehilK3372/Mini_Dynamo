@@ -78,9 +78,12 @@ services:
       retries: 10
     restart: unless-stopped
 
+  # Stateless — scaled to 2 replicas behind nginx (Tier 4.4). No container_name or
+  # host port so it can scale; nginx (below) is the single front door on :8080.
+  # The gateway discovers the ring via gossip-fed RING polling and routes each key
+  # to its primary owner, so replicas share load across all cluster nodes.
   gateway:
     build: ./gateway
-    container_name: gateway
     environment:
       DB_URL: jdbc:postgresql://postgres:5432/minidynamo
       DB_USERNAME: minidynamo
@@ -90,8 +93,6 @@ services:
       AUTH_USERNAME: ${AUTH_USERNAME:-admin}
       AUTH_PASSWORD: ${AUTH_PASSWORD:-changeme}
       JAVA_TOOL_OPTIONS: ${JAVA_TOOL_OPTIONS:-}
-    ports:
-      - "8080:8080"
     networks:
       - dhtnet
     depends_on:
@@ -99,6 +100,23 @@ services:
         condition: service_healthy
       node1:
         condition: service_started
+    deploy:
+      replicas: ${GATEWAY_REPLICAS:-2}
+    restart: unless-stopped
+
+  # Load balancer + single public entry point on :8080. Round-robins across the
+  # gateway replicas via Docker DNS (see deploy/nginx/nginx.conf).
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: nginx
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "8080:80"
+    networks:
+      - dhtnet
+    depends_on:
+      - gateway
     restart: unless-stopped
 
   prometheus:

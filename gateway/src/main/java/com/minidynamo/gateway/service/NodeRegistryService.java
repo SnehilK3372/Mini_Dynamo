@@ -44,6 +44,17 @@ public class NodeRegistryService {
     @Transactional
     public int syncFromCluster() {
         List<RingNode> ring = cluster.ring();
+        persist(ring);
+        return ring.size();
+    }
+
+    /**
+     * Upsert an already-fetched ring into the registry. Split out so the periodic
+     * {@code RingPoller} — which fetches the ring once to rebuild its router — can
+     * reuse that same snapshot for Postgres instead of issuing a second RING call.
+     */
+    @Transactional
+    public void persist(List<RingNode> ring) {
         Instant now = Instant.now();
         for (RingNode rn : ring) {
             NodeEntity existing = repo.findById(rn.id()).orElse(null);
@@ -56,7 +67,6 @@ public class NodeRegistryService {
                 repo.save(existing);
             }
         }
-        return ring.size();
     }
 
     @EventListener(ApplicationReadyEvent.class)
