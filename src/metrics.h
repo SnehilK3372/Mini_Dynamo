@@ -55,6 +55,12 @@ class Metrics {
     virtual void incAntiEntropyKeysRepaired() = 0;
     virtual uint64_t antiEntropySyncCount() const = 0;
     virtual uint64_t antiEntropyKeysRepairedCount() const = 0;
+
+    // Connection pool (Tier 4.3): a fresh connect vs. reuse of an idle connection.
+    virtual void incPoolConnectionCreated() = 0;
+    virtual void incPoolConnectionReused() = 0;
+    virtual uint64_t poolConnectionCreatedCount() const = 0;
+    virtual uint64_t poolConnectionReusedCount() const = 0;
 };
 
 // Default process-local implementation: plain atomic counters, no HTTP surface.
@@ -94,6 +100,19 @@ class InMemoryMetrics : public Metrics {
         return ae_keys_repaired_.load(std::memory_order_relaxed);
     }
 
+    void incPoolConnectionCreated() override {
+        pool_created_.fetch_add(1, std::memory_order_relaxed);
+    }
+    void incPoolConnectionReused() override {
+        pool_reused_.fetch_add(1, std::memory_order_relaxed);
+    }
+    uint64_t poolConnectionCreatedCount() const override {
+        return pool_created_.load(std::memory_order_relaxed);
+    }
+    uint64_t poolConnectionReusedCount() const override {
+        return pool_reused_.load(std::memory_order_relaxed);
+    }
+
     uint64_t requestCount() const { return requests_.load(std::memory_order_relaxed); }
     uint64_t quorumSuccessCount() const { return quorum_ok_.load(std::memory_order_relaxed); }
     uint64_t quorumFailureCount() const { return quorum_fail_.load(std::memory_order_relaxed); }
@@ -107,4 +126,6 @@ class InMemoryMetrics : public Metrics {
     std::atomic<uint64_t> hints_delivered_{0};
     std::atomic<uint64_t> ae_syncs_{0};
     std::atomic<uint64_t> ae_keys_repaired_{0};
+    std::atomic<uint64_t> pool_created_{0};
+    std::atomic<uint64_t> pool_reused_{0};
 };

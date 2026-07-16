@@ -47,10 +47,19 @@ class FakeReplicaClient : public ReplicaClient {
     ReplicaReadResult readReplica(const NodeInfo &peer, const string &,
                                   std::chrono::milliseconds) override {
         InflightGuard g(inflight_);
+        {
+            std::lock_guard<std::mutex> lk(m_);
+            readNodes_.insert(peer.node_id);  // record every peer we actually read
+        }
         if (down.count(peer.node_id)) return {false, false, {}};
         auto it = readProgram.find(peer.node_id);
         if (it != readProgram.end()) return it->second;
         return {true, false, {}};  // responded, key absent
+    }
+
+    bool wasReadCalledOn(const string &node) {
+        std::lock_guard<std::mutex> lk(m_);
+        return readNodes_.count(node) > 0;
     }
 
     // Block until at least n writes have been captured (or timeout). This is the
@@ -87,6 +96,7 @@ class FakeReplicaClient : public ReplicaClient {
     std::condition_variable cv_;
     std::vector<std::pair<string, VersionedValue>> writes_;
     std::map<string, VersionedValue> lastWrite_;
+    std::set<string> readNodes_;  // node_ids readReplica was invoked on
     std::atomic<int> inflight_{0};
 };
 
@@ -221,6 +231,39 @@ TEST(Coordinator, GetFailsWhenRNotMet) {
     GetResult r = c.coordinateGet("k", 3, 2);
     EXPECT_EQ(r.status, GetResult::Status::ERROR);
     EXPECT_EQ(r.error, "quorum_not_met");
+}
+
+// Liveness-aware fan-out (Tier 4.3): a replica gossip has confirmed dead is not
+// read at all — the coordinator meets R via the local read + the live remote,
+// and never spends a thread waiting on the dead one.
+TEST(Coordinator, GetSkipsKnownDeadReplica) {
+    Fixture f;
+    // node1 (local) empty; node3 holds the value; node2 is the dead one.
+    f.replicas.readProgram["node3"] = foundVersion("v", clk({{"node1", 1}}));
+    auto c = f.make();
+    c.setLivenessCheck([](const string &id) { return id != "node2"; });
+
+    GetResult r = c.coordinateGet("k", /*N=*/3, /*R=*/2);
+    ASSERT_EQ(r.status, GetResult::Status::OK);
+    EXPECT_EQ(r.values[0].data, "v");
+    // The dead replica was skipped entirely; the live one was read.
+    EXPECT_FALSE(f.replicas.wasReadCalledOn("node2"));
+    EXPECT_TRUE(f.replicas.wasReadCalledOn("node3"));
+}
+
+// If liveness leaves fewer than R reachable owners, the read fails fast rather
+// than stalling — quorum_not_met is the honest outcome.
+TEST(Coordinator, GetFailsFastWhenTooManyDead) {
+    Fixture f;
+    auto c = f.make();
+    // Both remotes dead → only the local read remains, which can't meet R=2.
+    c.setLivenessCheck([](const string &id) { return id == "node1"; });
+
+    GetResult r = c.coordinateGet("k", 3, 2);
+    EXPECT_EQ(r.status, GetResult::Status::ERROR);
+    EXPECT_EQ(r.error, "quorum_not_met");
+    EXPECT_FALSE(f.replicas.wasReadCalledOn("node2"));
+    EXPECT_FALSE(f.replicas.wasReadCalledOn("node3"));
 }
 
 // ---- Read repair --------------------------------------------------------

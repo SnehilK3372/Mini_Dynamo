@@ -82,10 +82,21 @@ PrometheusMetrics::PrometheusMetrics(const std::string &bind_address, const std:
                                .Help("Keys repaired by anti-entropy sync")
                                .Register(*registry_);
 
+    auto &pool_created_family = BuildCounter()
+                                    .Name("minidynamo_pool_connections_created_total")
+                                    .Help("Fresh peer connections opened by the connection pool")
+                                    .Register(*registry_);
+    auto &pool_reused_family = BuildCounter()
+                                   .Name("minidynamo_pool_connections_reused_total")
+                                   .Help("Idle peer connections reused from the connection pool")
+                                   .Register(*registry_);
+
     hints_stored_ = &hints_stored_family.Add(node);
     hints_delivered_ = &hints_delivered_family.Add(node);
     ae_syncs_ = &ae_syncs_family.Add(node);
     ae_keys_repaired_ = &ae_keys_family.Add(node);
+    pool_created_ = &pool_created_family.Add(node);
+    pool_reused_ = &pool_reused_family.Add(node);
 
     node_up_ = &up_family.Add(node);
     node_up_->Set(1);
@@ -127,4 +138,13 @@ uint64_t PrometheusMetrics::antiEntropySyncCount() const {
 }
 uint64_t PrometheusMetrics::antiEntropyKeysRepairedCount() const {
     return static_cast<uint64_t>(ae_keys_repaired_->Value());
+}
+
+void PrometheusMetrics::incPoolConnectionCreated() { pool_created_->Increment(); }
+void PrometheusMetrics::incPoolConnectionReused() { pool_reused_->Increment(); }
+uint64_t PrometheusMetrics::poolConnectionCreatedCount() const {
+    return static_cast<uint64_t>(pool_created_->Value());
+}
+uint64_t PrometheusMetrics::poolConnectionReusedCount() const {
+    return static_cast<uint64_t>(pool_reused_->Value());
 }

@@ -1,17 +1,23 @@
 #include "tcp_server.h"
 
 #include <arpa/inet.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include <cstring>
 #include <iostream>
-#include <thread>
 
 #include "framing.h"
 using namespace std;
 
-TCPServer::TCPServer(const string &host_, int port_, Node *node_)
-    : host(host_), port(port_), node(node_) {}
+TCPServer::TCPServer(const string &host_, int port_, Node *node_, size_t workers,
+                     int idle_timeout_ms)
+    : host(host_),
+      port(port_),
+      node(node_),
+      idle_timeout_ms_(idle_timeout_ms),
+      pool_(make_unique<ThreadPool>(workers)) {}
 
 void TCPServer::start() {  // init a tcp connection at given port associated with the node
     int server_fd;
@@ -54,18 +60,34 @@ void TCPServer::start() {  // init a tcp connection at given port associated wit
             continue;
         }
 
-        thread(&TCPServer::handleClient, this, new_socket).detach();
+        // Dispatch to the worker pool instead of spawning a thread per connection.
+        // If the pool is shutting down (enqueue fails), close the socket so it
+        // isn't leaked.
+        int fd = new_socket;
+        if (!pool_->enqueue([this, fd] { handleConnection(fd); })) {
+            close(fd);
+        }
     }
 }
 
-void TCPServer::handleClient(int client_fd) {  // reads one framed request, dispatches, replies
+void TCPServer::handleConnection(int client_fd) {
+    // Bound idle time: an idle-but-alive pooled connection is kept, but a peer
+    // that vanishes without a FIN is eventually reaped when recv times out. Set
+    // longer than the client-side pool's idle reap so the client closes first in
+    // the common case.
+    timeval tv{};
+    tv.tv_sec = idle_timeout_ms_ / 1000;
+    tv.tv_usec = (idle_timeout_ms_ % 1000) * 1000;
+    setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    // Serve framed requests back-to-back on the same connection until the peer
+    // closes it (recvFramed returns false on EOF, timeout, or a malformed frame).
+    // handleRequest writes the framed reply itself. A one-shot client (e.g. the
+    // Java gateway) simply sends one frame and closes, which this loop handles as
+    // one iteration followed by an EOF.
     string payload;
-    if (!framing::recvFramed(client_fd, payload)) {
-        close(client_fd);
-        return;
+    while (framing::recvFramed(client_fd, payload)) {
+        node->handleRequest(payload, client_fd);
     }
-
-    node->handleRequest(payload, client_fd);
-
     close(client_fd);
 }

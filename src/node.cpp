@@ -48,12 +48,12 @@ void reply(int fd, const string &payload) { framing::sendFramed(fd, payload); }
 }  // namespace
 
 Node::Node(const NodeInfo &info_, Router *router, unique_ptr<StorageEngine> storage,
-           unique_ptr<Metrics> metrics, QuorumConfig cfg)
+           unique_ptr<Metrics> metrics, QuorumConfig cfg, unique_ptr<ReplicaClient> replicas)
     : info(info_),
       router_(router),
       storage_(move(storage)),
       metrics_(metrics ? move(metrics) : make_unique<InMemoryMetrics>()),
-      replicas_(make_unique<TcpReplicaClient>(info_.node_id)),
+      replicas_(replicas ? move(replicas) : make_unique<TcpReplicaClient>(info_.node_id)),
       cfg_(cfg) {
     coordinator_ = make_unique<Coordinator>(info, router_, storage_.get(), replicas_.get(),
                                             metrics_.get(), cfg_);
