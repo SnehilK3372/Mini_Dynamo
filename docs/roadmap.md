@@ -16,6 +16,11 @@ independently mergeable; existing `scripts/e2e.sh` must stay green after each.
 Per-tier design records live in `docs/decisions/tier-4.<n>.md`; the approved
 implementation plans in `docs/plans/tier-4.<n>.md`.
 
+> **What actually limits the system today** — from a code-level audit, not the design docs — is in
+> **[`scalability-constraints.md`](scalability-constraints.md)**. It supersedes the Tier-2 scaling
+> analysis (which described the pre-gossip world). Read it before quoting any scalability claim: the
+> "scales to thousands" thesis is **unproven** until the multi-host benchmark actually runs.
+
 > **Deploying 4.4 + 4.5 together is a hard cutover.** 4.4 changed the ring hash and
 > 4.5 changed the vector-clock wire format. Both reshuffle/reinterpret stored data,
 > and a cluster must run a single build. Bring the stack down with

@@ -88,6 +88,13 @@ not the design. On real hardware with a distributed load generator (k6 Cloud or 
 runners) the same cluster posts higher, cleaner numbers. The hard ceiling on client throughput is
 the **single gateway** (one JVM/Tomcat), independent of node count.
 
+> **⚠️ Superseded by Tier 4 (4.1–4.5).** Everything in this section was accurate *at Tier 2* and is
+> the analysis that motivated Tier 4 — but it is **no longer true of the system today**. Gossip/SWIM
+> membership (4.1) replaced JOIN-only membership and added dead-node removal; hinted handoff +
+> Merkle anti-entropy landed in 4.2; ring-aware routing (4.4) removed the "gateway must hit the
+> bootstrap" constraint. Kept verbatim as the record of *why* Tier 4 happened. Current limits live in
+> `docs/scalability-constraints.md`.
+
 **More nodes (tens, hundreds, 1000+).** *Not* possible with the system as built — and this is an
 architecture limit, not a benchmark one. The blocker is **membership**:
 

@@ -131,10 +131,20 @@ PutResult Coordinator::writeQuorum(const string &key, const VersionedValue &vv, 
     // Sloppy quorum: if a target is known-dead (via gossip), pick the next alive
     // node from the ring as a stand-in and store a hint for later delivery.
     // This keeps writes available through single-node failures.
+    //
+    // The candidate list is fetched LAZILY — at most once, and only if an owner is
+    // actually dead. getAllPhysicalNodes() copies the whole membership under a
+    // lock, so doing it eagerly charged every write O(cluster size) (a 1000-element
+    // copy per write at 1000 nodes) to serve a branch that almost never runs.
     vector<NodeInfo> all_nodes;
-    if (is_alive_fn_ && hint_store_) {
-        all_nodes = router_->getAllPhysicalNodes();
-    }
+    bool all_nodes_loaded = false;
+    auto candidates = [&]() -> const vector<NodeInfo> & {
+        if (!all_nodes_loaded) {
+            all_nodes = router_->getAllPhysicalNodes();
+            all_nodes_loaded = true;
+        }
+        return all_nodes;
+    };
 
     for (const auto &owner : owners) {
         if (owner.node_id == self_.node_id) {
@@ -144,7 +154,7 @@ PutResult Coordinator::writeQuorum(const string &key, const VersionedValue &vv, 
             // Owner is dead — find a stand-in from the ring that is alive and
             // not already in the owner list.
             bool found_standin = false;
-            for (const auto &candidate : all_nodes) {
+            for (const auto &candidate : candidates()) {
                 if (candidate.node_id == self_.node_id) continue;
                 if (candidate.node_id == owner.node_id) continue;
                 bool already_in_owners = false;
