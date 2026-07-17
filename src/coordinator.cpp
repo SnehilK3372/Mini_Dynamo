@@ -85,6 +85,11 @@ VectorClock Coordinator::bumpedClock(const string &key, const VectorClock &conte
     VectorClock newClock = context;
     uint64_t base = max(context.get(self_.node_id), localClock(key).get(self_.node_id));
     newClock.set(self_.node_id, base + 1);
+    // Bound the clock before it is stored and replicated (Tier 4.5). Pruning
+    // *after* our own bump is deliberate: set() just stamped our entry with the
+    // current time, so it is the newest and can never be the entry dropped —
+    // the write we are coordinating always survives in the clock it carries.
+    newClock.prune(defaults_.max_clock_entries);
     return newClock;
 }
 

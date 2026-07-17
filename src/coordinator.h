@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <string>
@@ -24,6 +25,12 @@ struct QuorumConfig {
     int W = 2;
     int R = 2;
     std::chrono::milliseconds timeout{500};
+    // Upper bound on vector-clock entries (Tier 4.5). A clock gains an entry per
+    // node that ever coordinates the key, so at thousands of nodes an unbounded
+    // clock would bloat every value, message, and comparison. Generous on purpose:
+    // pruning discards causal information, so we only do it well past the point a
+    // real key needs (see docs/decisions/tier-4.5.md).
+    std::size_t max_clock_entries = 20;
 };
 
 struct PutResult {

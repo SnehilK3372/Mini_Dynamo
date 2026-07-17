@@ -131,8 +131,13 @@ int main() {
                           [metrics_ptr] { metrics_ptr->incPoolConnectionReused(); });
 
     auto pooled_replicas = make_unique<PooledReplicaClient>(&conn_pool, node_id);
-    Node node(myInfo, &router, makeStorage(node_id), move(metrics), QuorumConfig{},
-              move(pooled_replicas));
+
+    // Vector clocks are bounded (Tier 4.5) so they can't grow one entry per
+    // coordinator forever as the cluster scales.
+    QuorumConfig qcfg;
+    qcfg.max_clock_entries = static_cast<size_t>(stoi(getenv_str("MAX_CLOCK_ENTRIES", "20")));
+
+    Node node(myInfo, &router, makeStorage(node_id), move(metrics), qcfg, move(pooled_replicas));
 
     router.addPhysicalNode(myInfo);
 

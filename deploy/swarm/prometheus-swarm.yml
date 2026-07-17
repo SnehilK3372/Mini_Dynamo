@@ -1,0 +1,35 @@
+# Prometheus config for the Swarm stack (Tier 4.5). Unlike the single-host
+# compose config, nothing here can be a static target: `kvstore` scales from a
+# handful to 100 replicas, so both jobs discover their targets through Swarm's
+# embedded DNS. An A-record lookup of `tasks.<service>` returns every task IP.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: gateway
+    metrics_path: /actuator/prometheus
+    dns_sd_configs:
+      - names: ['tasks.gateway']
+        type: A
+        port: 8080
+        refresh_interval: 10s
+
+  # The bootstrap seed is an ordinary ring member — scrape it like any node.
+  - job_name: mini-dynamo-seed
+    metrics_path: /metrics
+    dns_sd_configs:
+      - names: ['tasks.seed']
+        type: A
+        port: 9100
+        refresh_interval: 10s
+
+  # Scales with `docker service scale <stack>_kvstore=N`; new replicas are picked
+  # up within refresh_interval without touching this file.
+  - job_name: mini-dynamo-nodes
+    metrics_path: /metrics
+    dns_sd_configs:
+      - names: ['tasks.kvstore']
+        type: A
+        port: 9100
+        refresh_interval: 10s
