@@ -35,7 +35,25 @@ class Swim {
 
     // Apply a membership event (from incoming SWIM message or local detection).
     // Returns true if the event caused a state change (should be re-disseminated).
+    //
+    // Events here are RELAYED — third-party gossip — so they are gated on
+    // incarnation and can never resurrect a node we hold Dead. Use
+    // applyDirectJoin() for the join handshake, where the node speaks for itself.
     bool applyEvent(const MemberEvent &event);
+
+    // Apply a JOIN received directly from the joining node (the SWIM_JOIN
+    // handshake). Unlike relayed gossip, this is the node itself announcing that
+    // it is up, so it is authoritative and is never rejected on incarnation.
+    //
+    // A restarted process comes back at incarnation 0 while we may still hold it
+    // Dead at >= 0. Simply accepting it at 0 would revive it locally but leave
+    // every *other* node stuck: they hold Dead@0 and reject a relayed Alive@0. So
+    // the reviver bumps past its own stale record and returns the incarnation the
+    // cluster should now use — the caller disseminates Alive at that value, which
+    // peers accept because it is strictly newer than the Dead they hold.
+    //
+    // Returns the effective incarnation for the joiner.
+    uint64_t applyDirectJoin(const MemberEvent &event);
 
     // Mark a peer as suspect (called when ping + indirect probe fail).
     void suspect(const std::string &node_id);

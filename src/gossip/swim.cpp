@@ -57,46 +57,29 @@ bool Swim::applyEvent(const MemberEvent &event) {
                 fireCallbacks(entry.info, MemberState::Alive);
                 return true;
             }
-            // A Join is the node speaking for ITSELF through the join handshake —
-            // authoritative proof it is up, whatever we remember about it. Accept it
-            // unconditionally, adopting its fresh incarnation and address.
+            // Everything here is RELAYED gossip — a third party telling us about
+            // someone else — so it only wins with a STRICTLY newer incarnation,
+            // whatever state we hold. (The join handshake, where the node speaks
+            // for itself, goes through applyDirectJoin instead.)
             //
-            // This must not be gated on incarnation: a restarted process starts again
-            // at incarnation 0, while we still hold it Dead at >= 0, so a
-            // "strictly higher" rule strands a healthy node as Dead *forever* — it
-            // gets no traffic, and (because hinted handoff fires on Dead -> Alive) its
-            // hints are never delivered and silently expire. The incarnation guard
-            // exists to stop STALE THIRD-PARTY GOSSIP (relayed Alive events) from
-            // resurrecting a node that really is gone; a direct join is not that.
-            if (event.type == EventType::Join && it->second.state == MemberState::Dead) {
-                it->second.state = MemberState::Alive;
-                it->second.incarnation = event.incarnation;
-                if (!event.host.empty()) {
-                    it->second.info.host = event.host;
-                    it->second.info.port = event.port;
-                }
-                fireCallbacks(it->second.info, MemberState::Alive);
-                return true;
+            // Strictly-newer matters for Suspect in particular. This used to accept
+            // same-incarnation (`>=`), which meant a stale relayed Alive/Join at the
+            // node's current incarnation cleared suspicion. Worse, gossip re-enqueues
+            // any event that changed state, so that event was re-disseminated, came
+            // back, cleared suspicion again, and never died: a failed node could be
+            // resurrected forever and never be declared Dead. Only the suspected node
+            // itself may refute, and it does so by bumping its own incarnation —
+            // which is strictly newer, so it still wins here.
+            if (event.incarnation <= it->second.incarnation) return false;
+
+            it->second.state = MemberState::Alive;
+            it->second.incarnation = event.incarnation;
+            if (!event.host.empty()) {
+                it->second.info.host = event.host;
+                it->second.info.port = event.port;
             }
-            // Relayed liveness (Alive), or a Join for a node we already track as
-            // live: only a strictly newer incarnation may override what we hold.
-            if (it->second.state == MemberState::Dead) {
-                if (event.incarnation <= it->second.incarnation) return false;
-            } else if (it->second.state == MemberState::Alive) {
-                if (event.incarnation <= it->second.incarnation) return false;
-            }
-            // Suspect can be overridden by same-or-higher incarnation alive.
-            if (event.incarnation >= it->second.incarnation) {
-                it->second.state = MemberState::Alive;
-                it->second.incarnation = event.incarnation;
-                if (!event.host.empty()) {
-                    it->second.info.host = event.host;
-                    it->second.info.port = event.port;
-                }
-                fireCallbacks(it->second.info, MemberState::Alive);
-                return true;
-            }
-            return false;
+            fireCallbacks(it->second.info, MemberState::Alive);
+            return true;
         }
 
         case EventType::Suspect: {
@@ -128,6 +111,37 @@ bool Swim::applyEvent(const MemberEvent &event) {
         default:
             return false;
     }
+}
+
+uint64_t Swim::applyDirectJoin(const MemberEvent &event) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (event.node_id == self_.node_id) return incarnation_;  // never about ourselves
+
+    auto it = members_.find(event.node_id);
+    if (it == members_.end()) {
+        MemberEntry entry;
+        entry.info = {event.node_id, event.host, event.port};
+        entry.state = MemberState::Alive;
+        entry.incarnation = event.incarnation;
+        members_[event.node_id] = entry;
+        fireCallbacks(entry.info, MemberState::Alive);
+        return event.incarnation;
+    }
+
+    // The node is telling us directly that it is up, so believe it. Bump past any
+    // record we hold, so the Alive we disseminate is strictly newer than the
+    // Dead/Suspect our peers may be holding — otherwise they would reject it and
+    // the node would come back for us but stay invisible to everyone else.
+    uint64_t eff = std::max(event.incarnation, it->second.incarnation + 1);
+    bool changed = it->second.state != MemberState::Alive;
+    it->second.state = MemberState::Alive;
+    it->second.incarnation = eff;
+    if (!event.host.empty()) {
+        it->second.info.host = event.host;
+        it->second.info.port = event.port;
+    }
+    if (changed) fireCallbacks(it->second.info, MemberState::Alive);
+    return eff;
 }
 
 void Swim::suspect(const std::string &node_id) {

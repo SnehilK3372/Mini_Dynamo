@@ -16,9 +16,17 @@ add_library(kv_core STATIC
     src/router.cpp
     src/message.cpp
     src/coordinator.cpp
+    src/replica_ops.cpp
     src/storage/in_memory_storage.cpp
     src/gossip/member_event.cpp
     src/gossip/swim.cpp
+    # log.cpp and gossip_thread.cpp are portable (log.cpp already handles _WIN32,
+    # and GossipThread reaches the network only through an injected SendFn). They
+    # sat in the node-only target purely because gossip_thread includes log.h —
+    # which meant GossipThread could never be linked by a test. Moving them here
+    # is what lets tests/support/in_process_cluster.h drive real gossip.
+    src/log.cpp
+    src/gossip/gossip_thread.cpp
     src/hints/hint_store.cpp
     src/hints/handoff_thread.cpp
     src/antientropy/merkle_tree.cpp
@@ -28,6 +36,19 @@ add_library(kv_core STATIC
 )
 target_include_directories(kv_core PUBLIC src)
 target_link_libraries(kv_core PUBLIC Threads::Threads)
+
+# spdlog backs structured JSON logging when present (Debian's libspdlog-dev ships
+# a CMake config). Absent — e.g. a lean test image, or the Windows dev box —
+# log.cpp falls back to its own stdout JSON writer, so everything still builds.
+#
+# This attaches to kv_core, not the node binary: log.cpp compiles into kv_core, so
+# defining HAVE_SPDLOG on `kvstore` would silently no-op and drop the node back to
+# the fallback writer. PUBLIC so both kvstore and the tests link it transitively.
+find_package(spdlog CONFIG QUIET)
+if(spdlog_FOUND)
+    target_compile_definitions(kv_core PRIVATE HAVE_SPDLOG)
+    target_link_libraries(kv_core PUBLIC spdlog::spdlog)
+endif()
 
 # --- Optional RocksDB detection --------------------------------------------
 # Debian's librocksdb-dev ships no CMake package config, so fall back to a plain
@@ -72,17 +93,16 @@ endif()
 
 # --- kvstore: the node binary (POSIX sockets; built on Linux/Docker) --------
 if(UNIX)
+    # log.cpp and gossip/gossip_thread.cpp now live in kv_core (see above).
     set(NODE_SOURCES
         src/main.cpp
         src/node.cpp
-        src/log.cpp
         src/net/tcp_server.cpp
         src/net/tcp_client.cpp
         src/net/tcp_connect.cpp
         src/net/framing.cpp
         src/net/tcp_replica_client.cpp
         src/net/pooled_replica_client.cpp
-        src/gossip/gossip_thread.cpp
     )
     if(HAVE_ROCKSDB)
         list(APPEND NODE_SOURCES src/storage/rocksdb_storage.cpp)
@@ -107,15 +127,6 @@ if(UNIX)
     if(HAVE_PROMETHEUS)
         target_compile_definitions(kvstore PRIVATE HAVE_PROMETHEUS)
         target_link_libraries(kvstore PRIVATE prometheus-cpp::pull prometheus-cpp::core)
-    endif()
-
-    # spdlog backs structured JSON logging when present (Debian's libspdlog-dev
-    # ships a CMake config). Absent — e.g. the lean test image — log.cpp falls
-    # back to its own stdout JSON writer, so the node still builds and logs.
-    find_package(spdlog CONFIG QUIET)
-    if(spdlog_FOUND)
-        target_compile_definitions(kvstore PRIVATE HAVE_SPDLOG)
-        target_link_libraries(kvstore PRIVATE spdlog::spdlog)
     endif()
 endif()
 

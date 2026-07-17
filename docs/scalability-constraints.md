@@ -26,6 +26,17 @@ been run, so `bench/scale/RESULTS.md` is empty.
 
 ## 2. Real constraints today
 
+### 2.0 A permanently-dead node keeps its ring slots forever
+Since the testing tier, gossip-detected death no longer evicts a node from the ring — that is correct
+(a *temporary* failure must not reshuffle key ownership, and evicting made hinted handoff unreachable;
+see `docs/decisions/tier-testing.md`). The consequence to accept: a node that is gone **permanently**
+still holds its vnodes, so its keys are served by stand-ins whose hints expire after `HINT_TTL_SECONDS`
+(3h), leaving those keys under-replicated indefinitely.
+
+Dynamo separates this out as an **administrative removal**, and this system has no such path yet:
+`EventType::Leave` exists in the enum but nothing emits it. *Fix:* a `LEAVE`/decommission command that
+removes a node from the ring deliberately. Until then, permanent departures need a manual redeploy.
+
 ### 2.1 Anti-entropy is not wired across nodes — **the biggest functional gap**
 `MerkleTree` is implemented and unit-tested, but `exchange_fn`/`pull_fn` in `src/main.cpp` are
 **stubs that return empty**. So nodes never actually compare trees.
@@ -106,7 +117,21 @@ changes require a fresh ring anyway) but means the cluster is not durable across
 
 ---
 
-## 3. Fixed during this audit
+## 3. Fixed during the audit and the testing tier
+
+### 3.-1 Three more bugs, found by the in-process cluster harness on its first run
+All were live in `main` and all had shipped through a green suite
+(`docs/decisions/tier-testing.md`):
+
+- **Hinted handoff was unreachable — Tier 4.2 had never stored a single hint.** A node is `isAlive`
+  while `Alive` *or* `Suspect`, and the moment it turned `Dead` gossip removed it from the ring, so it
+  was never a "dead owner" the coordinator could hint for. The live `hints_stored_total` of 0 was not
+  "no outage yet" — it was impossible. Fixed by keeping dead nodes in the ring (§2.0).
+- **A same-incarnation relay cleared suspicion, forever.** Combined with gossip re-enqueueing anything
+  that changed state, a stale event flipped Suspect→Alive, got re-disseminated, and came back — so a
+  dead node could never be declared dead. Cluster tests took 30s before the fix, 0.15s after.
+- **A fabricated ack** let one physical replica satisfy two acks when no stand-in existed, so `W=3`
+  could "succeed" against two replicas.
 
 ### 3.0 A restarted node could never rejoin — **the most serious bug found**
 A node that restarts begins again at **incarnation 0**, while the cluster still holds it `Dead` at
