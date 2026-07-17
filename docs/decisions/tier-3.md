@@ -47,6 +47,10 @@ not a new prod compose file, is the exposure control.
 4. **t3.medium, not t3.small.** ~7 containers including a JVM (gateway), Grafana, and
    Prometheus don't fit comfortably in 2 GB; 4 GB is the safe minimum. *Rejected:* t3.small —
    cheaper, but OOM-prone under the full stack; a demo that falls over isn't a demo.
+   > **Superseded by Tier 4:** the recommendation is now **`m7i-flex.large`** (2 vCPU, 8 GB). Tier 4
+   > added per-node gossip, hint, and anti-entropy threads plus a second gateway replica and nginx,
+   > which 4 GB no longer holds comfortably. The 2-vCPU burstable ceiling also distorted the Tier-4.3
+   > chaos numbers. See `deploy/aws/README.md` and `docs/runbooks/ec2-deploy.md`.
 
 5. **Manual (`workflow_dispatch`) SSH deploy, not auto-deploy on merge.** A portfolio demo
    box should redeploy when *I* choose, not on every commit — and SSH + `docker compose up`

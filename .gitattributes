@@ -1,0 +1,18 @@
+# Everything here executes on Linux (Docker images, EC2, CI runners) — and this
+# repo is commonly checked out on Windows, where git rewrites text files to CRLF.
+# A shell script with CRLF fails immediately and cryptically on Linux:
+#   bench/chaos.sh: line 14: set: pipefail: invalid option name
+# (bash reads the trailing \r as part of the option). Docker/compose configs and
+# the Maven wrapper have the same exposure.
+#
+# Committed blobs happen to be LF today only because core.autocrlf normalises on
+# commit — an implicit guard that one differently-configured clone would remove.
+# These rules make it explicit and independent of anyone's local git config, and
+# keep the Windows working tree runnable under WSL.
+
+*.sh        text eol=lf
+mvnw        text eol=lf
+Dockerfile  text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.conf      text eol=lf

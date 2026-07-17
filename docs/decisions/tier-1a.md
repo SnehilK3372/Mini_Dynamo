@@ -1,5 +1,14 @@
 # Tier 1A — Complete the Distributed Core (decisions log)
 
+> **Point-in-time record (Tier 1A).** Two details here have since changed, by design:
+> - **Hinted handoff / anti-entropy are called "deferred to Tier 3"** below — they actually landed in
+>   **Tier 4.2** (`docs/decisions/tier-4.2.md`). The reasoning for deferring them still stands.
+> - **The vector clock gained per-entry timestamps in Tier 4.5**, so the wire form is now
+>   `node:counter:ts`, not `node:counter`, and clocks are pruned to a bound. Causality is unchanged —
+>   `compare()` still reads counters only. See `docs/decisions/tier-4.5.md`.
+>
+> The design choices and the "where this could break" analysis below remain accurate.
+
 ## What was built
 
 The four dependency-ordered pieces that make the "Dynamo" claim true:

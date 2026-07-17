@@ -6,7 +6,7 @@
 
 **Every tier follows the same loop:**
 
-1. Enter plan mode. Read the relevant tier from `docs/build-plan.md` in full and produce an implementation plan. Wait for my explicit approval before writing any code.
+1. Enter plan mode. Read the relevant tier from `docs/build_plan.md` (and `docs/roadmap.md` for Tier 4 onward) in full and produce an implementation plan. Wait for my explicit approval before writing any code.
 2. Implement fully — production-quality code, meaningful comments explaining *why*, and tests (GoogleTest for C++, JUnit/Mockito for Java).
 3. Run the tests yourself and iterate until green.
 4. Write `docs/decisions/tier-<N>.md` with: what you built, the key design choices, the alternative you rejected and why for each, and one or two places the implementation could break under adversarial conditions. Tight, not padded.
@@ -21,7 +21,7 @@
 
 ## What this is
 
-Mini Dynamo — a distributed key-value store in C++17, modeled on Amazon Dynamo. Keys are placed on a consistent-hashing ring; each node stores its own shard and replicates writes to peers. See `@docs/architecture.md` for the full design (target end-state) and `@docs/build-plan.md` for the tiered path from current code to there. **Read the relevant tier before implementing it.**
+Mini Dynamo — a distributed key-value store in C++17, modeled on Amazon Dynamo. Keys are placed on a consistent-hashing ring; each node stores its own shard and replicates writes to peers. See `@docs/full_arch.md` for the full design (target end-state) and `@docs/build_plan.md` for the tiered path; `@docs/roadmap.md` tracks Tier 4 status and what's left. Per-tier decision records: `@docs/decisions/`. Approved plans: `@docs/plans/`. **Current, code-level limits: `@docs/scalability-constraints.md`.** **Read the relevant tier before implementing it.**
 
 ## Stack (do not deviate without flagging)
 
@@ -33,42 +33,38 @@ Mini Dynamo — a distributed key-value store in C++17, modeled on Amazon Dynamo
 ## Build, run, test
 
 ```bash
-docker-compose up --build         # canonical: 3-node cluster (node1 bootstrap :5001, node2/3 join)
-cmake . && make -j4               # direct build inside Linux — produces ./kvstore
+docker compose up --build                        # canonical: 9 containers, API via nginx :8080
+cmake -S . -B build -DBUILD_TESTING=ON && cmake --build build -j4 && ctest --test-dir build
+cd gateway && ./mvnw test                        # Java suite
+scripts/e2e.sh                                   # whole-stack e2e, one command
 ```
 
-POSIX sockets — Linux/Docker only, no native Windows build.
+POSIX sockets — the node binary is Linux/Docker only. `kv_core` + the unit tests build anywhere.
 
-A node is configured entirely via env vars (see `main.cpp`): `NODE_ID`, `NODE_PORT`, `HOST` (default `0.0.0.0`), and for non-bootstrap nodes `BOOTSTRAP_IP` + `BOOTSTRAP_PORT`. A node is the bootstrap iff `BOOTSTRAP_IP` is empty.
+A node is configured entirely via env vars (see `main.cpp`): `NODE_ID`, `NODE_PORT`, `HOST`, `SEED_NODES` (omit to self-bootstrap), `ADVERTISE_HOST`, `VNODES`, `STORAGE_ENGINE`, `DATA_DIR`, `MAX_CLOCK_ENTRIES`, `WORKER_THREADS`, `POOL_*`, `GOSSIP_*`. Full table in `README.md`.
 
-**No automated tests exist yet** — `tests.txt` is manual `netcat` scripts. Standing up GoogleTest is part of Tier 1A. Until then, exercise manually: `printf "PUT|k1|v1|cli" | nc node1 5001`.
+**Tests are real and CI-gated** (89 C++ / 31 Java + e2e, on every push). `tests.txt` was removed in Tier 1D. **CI pins `clang-format` 14** — format with `clang-format-14`, or CI's lint job fails on version drift.
+
+**Local dev note:** this repo is checked out on Windows; the C++ toolchain lives in **WSL** (`g++`, no cmake) and `docker` is the Docker Desktop shim (needs Desktop running). Java/Maven run on the Windows side. Testcontainers tests can't reach the daemon from the Windows JVM, so `GatewayIntegrationTest` is CI-only locally.
 
 ## Ground truth about the current code (before you touch it)
 
-**Stale build artifacts — ignore them.** The root `Makefile`, `CMakeFiles/`, and `build/` are stale and hardcoded to a Linux author path (`/home/senku/Desktop/CN Project`). Only `CMakeLists.txt` is source of truth; regenerate with `cmake .`. Tier 0 removes them from history.
+*Accurate as of Tier 4.5. Everything Tier 0 flagged as stale/dead (`Makefile`, `CMakeFiles/`, `build/`, `src/hash.cpp`, `config/node_config.json`, `tests.txt`, `Node::start()`, nlohmann-json) has been **removed** — it no longer exists, don't go looking for it.*
 
-**Request flow** (client `PUT`/`GET` hitting any node):
+**Request flow** (client → cluster):
 
-1. `TCPServer` (`src/net/tcp_server.cpp`) accepts, does a single `read()` of ≤4096 bytes, deserializes into a `Message`, calls `Node::onMessageReceived`.
-2. `Router` (`src/router.cpp`) is the consistent-hashing ring. `findOwners(key, N)` hashes with `hash64` and walks clockwise to return N distinct physical owners.
-3. `Node` (`src/node.cpp`) dispatches by type:
-   - **PUT** — if primary owner, store locally then fire-and-forget `REPLICATE` to the other `REPLICATION_FACTOR` (=3) owners; else forward to primary and relay reply.
-   - **GET** — walk owners, return the first that has the key; else `NOTFOUND`.
-   - **REPLICATE** — store locally.
-   - **JOIN** — reply `RING_UPDATE` listing current ring, then add joiner locally.
+1. **nginx** (`:8080`) round-robins to **2 stateless gateway replicas** (Spring Boot, JWT).
+2. The **gateway** hashes the key with a Java port of `hash64` (`HashUtil`) against a locally-cached ring (`RingRouter`, refreshed every 5s by `RingPoller` via the `RING` command) and connects **directly to the key's primary owner** over a pooled socket. If its ring is empty/stale it falls back to the seed list — routing is an optimization; the receiving node always coordinates against its own ring, so this only ever costs a hop.
+3. `TCPServer` (`src/net/tcp_server.cpp`) accepts and dispatches the connection to a fixed **ThreadPool**; the handler loops over **length-prefixed frames** on that socket until the peer closes it (connections are persistent).
+4. `Node` (`src/node.cpp`) parses the frame and delegates to `Coordinator`; `Router` (`src/router.cpp`, `shared_mutex`, 128 vnodes) answers "which N physical nodes own this key?".
+5. `Coordinator` (`src/coordinator.cpp`) runs the real quorum: fan out to N owners, `W` acks to commit / `R` responses to read, reconcile vector clocks, return the winner or **siblings**, and asynchronously **read-repair** stale replicas. Dead owners (per gossip) are **skipped on reads** and get a **hint** + stand-in on writes.
 
-**Bootstrap.** Startup lives in `main.cpp`, NOT `Node::start()`. Joining node sends `JOIN` to bootstrap, parses `RING_UPDATE`, adds each peer to its `Router`. No gossip, no dead-node removal.
+**Membership.** SWIM gossip (`src/gossip/`) — `SEED_NODES` (CSV) to join, then peer-to-peer probing with suspicion and dead-node eviction. `BOOTSTRAP_IP`/`BOOTSTRAP_PORT` still work as a single seed. Startup lives in `main.cpp`.
 
-**Wire protocol** (pipe-delimited, `src/message.cpp`):
-- Request: `TYPE|KEY|VALUE|ORIGIN`; `JOIN` appends `|HOST|PORT`
-- Response: `RESPONSE|OK|<value>`, `RESPONSE|NOTFOUND`, `RESPONSE|ERROR|<reason>`, or `RING_UPDATE\n<count>\n<id>|<host>|<port>\n...`
-- **Keys/values must not contain `|`** — no escaping.
+**Wire protocol** — length-prefixed framing (`<len>\n<payload>`, `src/net/framing.cpp`), pipe-delimited fields, **base64-encoded values** (so values may contain any bytes). Verbs: `PUT`, `GET`, `DELETE` (tombstone), `REPLICATE`, `READ`, `RING`, `SWIM_*`, legacy `JOIN`. Vector clocks serialize as `node:counter:timestamp`. **Node ids must not contain `|`, `:` or `,`.** Full table in `README.md`.
 
-**Framing mismatch (important when editing networking):** `TCPServer` reads unframed; `Node::sendMessage`/`TCPClient` send unframed. The length-prefixed `tcp_send_recv` path exists but is bypassed (`use_length_prefix=false`). Real traffic is single unframed reads.
+**Two breaking changes are live** — both require a **fresh cluster**, and all nodes must run one build:
+- Tier 4.4 replaced `hash64`'s `std::hash` seed with FNV-1a (portable to Java) → the ring reshuffles.
+- Tier 4.5 changed the clock wire form to `node:counter:ts` → old values reinterpret.
 
-**Dead / misleading code — do not reason from these; Tier 0 removes them:**
-- `Node::start()` and `Node::server_loop()` — never called; `main.cpp` runs its own JOIN + `TCPServer`. `start()` also reads different env vars (`SEED_HOST`/`SEED_PORT`) than the live path.
-- `store` / `store_mtx` in `node.h` — unused second map; live store is `local_storage` / `storage_mutex`.
-- `hashKey` (FNV) in `src/hash.cpp`/`hash.h` — unused; ring uses `hash64` from `src/util.h`.
-- `config/node_config.json` — not read anywhere.
-- `<nlohmann/json.hpp>` included by `node.h` and installed in the Dockerfile but unused.
+**Known gaps (don't rediscover these):** the Merkle **anti-entropy cross-node exchange is stubbed** in `main.cpp` (`antientropy_syncs_total` stays 0 — expected); the forward-to-primary and gossip paths are **not pooled**; the thread pool is connection-bound, not epoll. Current limits: `docs/scalability-constraints.md`.

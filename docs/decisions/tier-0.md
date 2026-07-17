@@ -18,9 +18,21 @@
 ## Where this could break under adversarial conditions
 
 - **`forEach` holds the engine mutex for the entire scan.** A slow visitor callback (e.g. a future anti-entropy pass doing network I/O per key) would block all reads/writes on that node for the scan's duration. Acceptable now (no callers); must be revisited before any scan-while-serving feature.
+  > **This prediction came true — but only on the non-default engine.** Tier 4.2's `AntiEntropyThread`
+  > scans with `forEach` every 5 minutes *while serving*. On **RocksDB (the production default) there
+  > is no stall**: `forEach` iterates via a RocksDB iterator and takes no engine-wide lock. The warning
+  > still holds for `InMemoryStorageEngine` (`STORAGE_ENGINE=memory`, tests), where the scan does block
+  > reads/writes. Tracked in `docs/scalability-constraints.md`.
 - **Unframed TCP reads are untouched by design this tier**: a request > 4096 bytes, or a slow sender whose bytes arrive in multiple segments, is silently truncated by `TCPServer`'s single `read()`, and a value containing `|` corrupts parsing. Both are known protocol debts; the framing/protocol rework belongs with the Tier 1A wire-format change, not a hygiene tier.
+  > **Fixed in Tier 1A:** length-prefixed framing (`src/net/framing.cpp`) + base64-encoded values.
+  > Tier 4.3 additionally made server connections persistent (multiple framed requests per socket).
 
 ## Verification status (honest)
+
+> **Resolved since.** Runtime verification was completed in Tier 1A (real RocksDB + a live
+> `docker-compose` cluster), and the whole stack now runs in CI on every push — 89 unit tests plus a
+> full-stack e2e. `tests.txt` itself was removed in Tier 1D. The "PENDING" note below is kept as the
+> honest record of what was true at Tier 0.
 
 - All translation units pass `g++ -std=c++17 -fsyntax-only` (POSIX headers stubbed for `node.cpp` on the Windows dev machine).
 - **Runtime verification is PENDING**: this machine has no Docker/WSL, so `docker-compose up --build` and the `nc` protocol tests (`tests.txt` scenarios incl. node-kill) have not been run against this commit. User chose to commit now and verify after installing Docker Desktop. Until that passes, Tier 0's definition of done is not fully met.

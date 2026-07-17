@@ -167,6 +167,61 @@ TEST_F(SwimTest, DeadCannotBeRevived) {
     EXPECT_FALSE(swim.isAlive("node2"));
 }
 
+// REGRESSION (found by the pre-deploy audit, not by a test): a process that
+// restarts begins again at incarnation 0, while the cluster still holds it Dead at
+// incarnation >= 0. Requiring a strictly-higher incarnation to revive stranded a
+// healthy restarted node as Dead *forever* — it received no traffic, and because
+// hinted handoff triggers on Dead -> Alive, its hints never delivered and expired
+// silently. A direct Join must be honoured whatever incarnation it carries.
+//
+// FreshJoinRevivesDead (below) missed this by using an artificially higher
+// incarnation (5) — it encoded the bug's assumption instead of a real restart.
+TEST_F(SwimTest, RestartedNodeRejoinsAtSameIncarnation) {
+    MemberEvent join;
+    join.type = EventType::Join;
+    join.node_id = "node2";
+    join.host = "host2";
+    join.port = 5002;
+    join.incarnation = 0;
+    swim.applyEvent(join);
+    swim.confirmDead("node2");
+    ASSERT_FALSE(swim.isAlive("node2"));
+
+    // The node restarts: same id, same address, incarnation back to 0.
+    MemberEvent rejoin;
+    rejoin.type = EventType::Join;
+    rejoin.node_id = "node2";
+    rejoin.host = "host2";
+    rejoin.port = 5002;
+    rejoin.incarnation = 0;  // NOT higher — a fresh process
+
+    EXPECT_TRUE(swim.applyEvent(rejoin)) << "a restarted node must be able to rejoin";
+    EXPECT_TRUE(swim.isAlive("node2"));
+}
+
+// The guard still has to do its job: a *relayed* Alive (third-party gossip) must
+// not resurrect a dead node without a strictly newer incarnation.
+TEST_F(SwimTest, StaleAliveGossipStillCannotReviveDead) {
+    MemberEvent join;
+    join.type = EventType::Join;
+    join.node_id = "node2";
+    join.host = "host2";
+    join.port = 5002;
+    join.incarnation = 0;
+    swim.applyEvent(join);
+    swim.confirmDead("node2");
+
+    MemberEvent stale_alive;
+    stale_alive.type = EventType::Alive;  // relayed, not a direct join
+    stale_alive.node_id = "node2";
+    stale_alive.host = "host2";
+    stale_alive.port = 5002;
+    stale_alive.incarnation = 0;
+
+    EXPECT_FALSE(swim.applyEvent(stale_alive));
+    EXPECT_FALSE(swim.isAlive("node2"));
+}
+
 TEST_F(SwimTest, FreshJoinRevivesDead) {
     MemberEvent join;
     join.type = EventType::Join;

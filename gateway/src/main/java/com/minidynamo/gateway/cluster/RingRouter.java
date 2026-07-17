@@ -1,6 +1,7 @@
 package com.minidynamo.gateway.cluster;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -30,9 +31,10 @@ public class RingRouter {
 
     private final int virtualNodes;
 
-    // TreeMap keyed by unsigned-compared Long, matching the C++ std::map<uint64_t>
-    // ordering. Volatile: rebuilt-and-swapped wholesale, never mutated in place.
-    private volatile NavigableMap<Long, RingNode> ring = emptyRing();
+    // The ring is keyed by unsigned-compared Long, matching the C++
+    // std::map<uint64_t> ordering. Volatile: rebuilt-and-swapped wholesale, never
+    // mutated in place, so readers never lock and never see a half-built ring.
+    private volatile Snapshot snapshot = new Snapshot(emptyRing());
 
     // virtualNodes MUST equal the C++ node default (128) or ring positions won't
     // line up and routing degrades to the forward-hop fallback.
@@ -52,28 +54,29 @@ public class RingRouter {
                 next.put(HashUtil.hash64(node.id() + "#vn" + i), node);
             }
         }
-        ring = next;  // atomic publish of the new snapshot
+        snapshot = new Snapshot(next);  // atomic publish of ring + its physical count
     }
 
     /** The N distinct physical owners of {@code key}, primary first; empty if the ring is unbuilt. */
     public List<RingNode> ownersFor(String key, int n) {
         if (n <= 0) n = 1;
-        NavigableMap<Long, RingNode> snap = ring;  // read the snapshot once
-        if (snap.isEmpty()) return List.of();
+        Snapshot snap = snapshot;  // read the snapshot once
+        if (snap.ring.isEmpty()) return List.of();
 
         long h = HashUtil.hash64(key);
         // Start at the first vnode >= h (unsigned), wrapping to the first entry —
         // the clockwise walk of Router::findOwners.
-        Map.Entry<Long, RingNode> start = snap.ceilingEntry(h);
-        Long cursor = (start != null) ? start.getKey() : snap.firstKey();
+        Map.Entry<Long, RingNode> start = snap.ring.ceilingEntry(h);
+        Long cursor = (start != null) ? start.getKey() : snap.ring.firstKey();
 
         Set<RingNode> owners = new LinkedHashSet<>();  // preserves ring order, dedups physicals
-        int distinctPhysicalCap = countPhysicals(snap);
         while (owners.size() < n) {
-            owners.add(snap.get(cursor));
-            if (owners.size() == distinctPhysicalCap) break;  // seen every physical node
-            Long nextKey = snap.higherKey(cursor);
-            cursor = (nextKey != null) ? nextKey : snap.firstKey();  // wrap
+            owners.add(snap.ring.get(cursor));
+            // Stop early once every physical node is represented, or a ring smaller
+            // than n would spin forever. The cap is precomputed (see Snapshot).
+            if (owners.size() == snap.physicalCount) break;
+            Long nextKey = snap.ring.higherKey(cursor);
+            cursor = (nextKey != null) ? nextKey : snap.ring.firstKey();  // wrap
         }
         return new ArrayList<>(owners);
     }
@@ -86,12 +89,33 @@ public class RingRouter {
 
     /** Number of physical nodes currently on the ring (for tests/observability). */
     public int physicalNodeCount() {
-        return countPhysicals(ring);
+        return snapshot.physicalCount;
     }
 
-    private static int countPhysicals(NavigableMap<Long, RingNode> snap) {
-        Set<String> ids = new LinkedHashSet<>();
-        for (RingNode n : snap.values()) ids.add(n.id());
+    private static int countPhysicals(NavigableMap<Long, RingNode> ring) {
+        Set<String> ids = new HashSet<>();
+        for (RingNode n : ring.values()) ids.add(n.id());
         return ids.size();
+    }
+
+    /**
+     * An immutable ring + the count of distinct physical nodes on it, published
+     * together so a reader always sees a consistent pair.
+     *
+     * <p>The count is precomputed deliberately: it is a property of the ring, but
+     * deriving it costs O(virtualNodes × nodes) — 12,800 entries at 100 nodes,
+     * 128,000 at 1000. Computing it per {@code ownersFor} call (i.e. per gateway
+     * request) made request cost grow *with cluster size*, which is precisely the
+     * scaling behaviour this system is supposed to avoid. Paying it once per
+     * rebuild (every ring poll) makes the read path O(n) in the replica count only.
+     */
+    private static final class Snapshot {
+        final NavigableMap<Long, RingNode> ring;
+        final int physicalCount;
+
+        Snapshot(NavigableMap<Long, RingNode> ring) {
+            this.ring = ring;
+            this.physicalCount = countPhysicals(ring);
+        }
     }
 }

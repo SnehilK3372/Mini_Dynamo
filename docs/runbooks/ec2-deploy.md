@@ -8,28 +8,45 @@ This is the operational companion to [`deploy/aws/README.md`](../../deploy/aws/R
 (which covers the launch/security-group specifics). Read that first for the
 instance sizing rationale.
 
-> **Scope:** single-host `docker compose` deploy (3 nodes + gateway + Postgres +
-> Prometheus + Grafana). Multi-host Swarm is a later tier.
+> **Scope:** single-host `docker compose` deploy. Multi-host Docker Swarm (for the
+> scaling benchmark) is `deploy/swarm/` — see [§11](#11-multi-host-swarm-optional).
+
+> ### ⚠️ Read this first: 4.4 + 4.5 require a **fresh cluster**
+> Tier 4.4 changed the ring hash and Tier 4.5 changed the vector-clock wire format.
+> Both reinterpret existing data, and **every node must run the same build** — a
+> mixed-build cluster splits key placement. Before deploying this version:
+> ```bash
+> cd ~/Mini_Dynamo && docker compose down -v
+> ```
+> Existing keys are not migrated; they become unreachable under the new hash. That
+> is expected for this project's redeploy model, not a bug.
 
 ---
 
 ## Topology & exposure
 
-The stack is 7 containers. Only **two** ports should ever face the internet:
+The stack is 9 containers (Tier 4.4 added **nginx** and a **second gateway
+replica**). Only **two** ports should ever face the internet:
 
 | Port | Service | Exposure |
 |------|---------|----------|
 | 22   | SSH | **My IP only** |
-| 8080 | gateway (public API) | `0.0.0.0/0` |
+| 8080 | **nginx** → round-robins to the gateway replicas | `0.0.0.0/0` |
 | 3000 | Grafana | SSH tunnel only |
 | 9090 | Prometheus | SSH tunnel only |
 | 9101–9103 | node `/metrics` | SSH tunnel only |
 | 5001–5003 | node client TCP | host-published, **not** internet-reachable |
+| — | gateway (×2) | **not** host-published — nginx fronts them |
 | — | Postgres | never published |
 
-The security group is the exposure control: open only 22 (My IP) and 8080. The
-other ports are published to the *host* but blocked from the internet, so you
-reach them over SSH tunnels (steps 8–9).
+`:8080` is now **nginx**, not the gateway directly — the gateway has no host port
+and no fixed container name so it can scale. Everything else is unchanged: the
+security group opens only 22 (My IP) and 8080; the rest is reached over SSH
+tunnels ([§8](#8-prometheus-ssh-tunnel)–[§9](#9-grafana-ssh-tunnel)).
+
+**Request path:** `client → nginx:8080 → gateway (×2) → node that owns the key`.
+Since 4.4 the gateway hashes the key locally and routes **straight to its primary
+owner**, so coordination spreads across all nodes instead of funnelling onto node1.
 
 ---
 
@@ -92,11 +109,14 @@ curl -X DELETE http://$HOST:8080/v1/kv/hello -H "Authorization: Bearer $TOKEN"
 
 ## 6. Verify Tier-4 features
 
-Confirm SWIM gossip converged and the Tier-4 threads started (run on the box):
+Confirm the stack came up as expected (run on the box):
 
 ```bash
-docker compose logs node1 --tail=30 | grep -iE 'hinted handoff|anti-entropy'
+docker compose ps                      # expect 2 gateway replicas + nginx
+curl -s localhost:8080/nginx-health    # "ok" → the LB itself is up
+docker compose logs node1 --tail=30 | grep -iE 'hinted handoff|anti-entropy|workers='
 docker compose logs node2 --tail=30 | grep -iE 'gossip|seed|join|alive'
+docker compose logs --tail=20 | grep -i 'ring'   # gateway ring polling
 ```
 
 Baseline the Tier-4 counters (all start at 0 on a fresh cluster):
@@ -105,14 +125,30 @@ Baseline the Tier-4 counters (all start at 0 on a fresh cluster):
 for p in 9101 9102 9103; do
   echo "== node :$p =="
   curl -s localhost:$p/metrics | grep -E \
-    'minidynamo_(hints_(stored|delivered)|antientropy_(syncs|keys_repaired))_total'
+    'minidynamo_(hints_(stored|delivered)|antientropy_(syncs|keys_repaired)|pool_connections_(created|reused))_total'
 done
 ```
 
-`hints_stored` / `hints_delivered` move during the chaos test (step 7). Note:
-the anti-entropy cross-node Merkle exchange is currently stubbed
-(`docs/decisions/tier-4.2.md`), so `antientropy_syncs_total` may stay flat —
-hinted handoff is the Tier-4 feature to demo live.
+What to expect, honestly:
+
+| Counter | Expectation |
+|---|---|
+| `pool_connections_reused_total` | should **dominate** `_created_total` under load (4.3 pooling working) |
+| `hints_stored/_delivered_total` | move during the chaos test (step 7) — the Tier-4 feature to demo live |
+| `antientropy_syncs_total` | **stays 0 — expected, not a bug.** The cross-node Merkle exchange is still stubbed (`docs/decisions/tier-4.2.md`, `docs/scalability-constraints.md` §2.1) |
+
+**Ring-aware routing check** — coordination should now spread across *all* nodes
+rather than piling onto node1. After some load, compare per-node request counts:
+
+```bash
+for p in 9101 9102 9103; do
+  printf "node :%s  " "$p"
+  curl -s localhost:$p/metrics | awk '/^minidynamo_requests_total/{s+=$2} END{print s+0}'
+done
+```
+Roughly balanced ⇒ 4.4 routing is working. Heavily skewed to node1 ⇒ the gateway's
+ring is empty/stale and it's falling back to the seed list (still correct, just
+un-optimized — see `docs/scalability-constraints.md` §2.9–2.10).
 
 ## 7. Load & chaos tests (run ON the box)
 
@@ -186,7 +222,19 @@ sum(rate(minidynamo_quorum_total{outcome="failure"}[1m])) by (op)
 minidynamo_hints_stored_total
 minidynamo_hints_delivered_total
 minidynamo_read_repair_total
+
+# Connection pooling (4.3) — reuse should dominate creation
+sum(rate(minidynamo_pool_connections_reused_total[1m]))
+sum(rate(minidynamo_pool_connections_created_total[1m]))
+
+# Ring-aware routing (4.4): coordination spread, not funnelled onto one node
+sum(rate(minidynamo_requests_total[1m])) by (node_id)
 ```
+
+> **Targets:** the gateway job now uses Docker DNS discovery (`dns_sd_configs`)
+> because it has multiple replicas — **Status → Targets should list both gateway
+> instances**. If only one appears, the second replica didn't start (see the
+> `deploy.replicas` note in Troubleshooting).
 
 ## 9. Grafana (SSH tunnel)
 
@@ -214,12 +262,54 @@ docker compose down    # stop stack, keep the box
 
 | Symptom | Check |
 |---------|-------|
+| **Keys written before this deploy are gone / 404** | **Expected.** 4.4 changed the ring hash and 4.5 the clock format — old data is unreachable. You must `docker compose down -v` and start fresh (see the banner at the top) |
+| **Only one gateway replica running** | Older `docker compose` ignores `deploy.replicas`. Force it: `docker compose up -d --scale gateway=2`. Harmless if not — nginx just fronts one replica |
+| **Requests all pile onto node1** | The gateway's ring is empty or stale, so it's using the seed-list fallback. Check gateway logs for ring polling; confirm node `VNODES` (128) matches gateway `cluster.virtual-nodes` (128) — a mismatch silently disables ring routing |
+| **`antientropy_syncs_total` stuck at 0** | Expected — cross-node Merkle exchange is stubbed (`docs/scalability-constraints.md` §2.1). Not a fault |
+| `502` from nginx | A gateway replica is down/restarting; `docker compose logs gateway`. nginx caches DNS for 10 s, so a just-removed replica can 502 briefly |
 | `compose build requires buildx 0.17.0 or later` | Amazon Linux's packaged Docker bundles an old buildx even when Docker itself is already installed. `bootstrap.sh` now upgrades it automatically; on an already-bootstrapped box, re-run `deploy/aws/bootstrap.sh` or manually drop a fresh `docker-buildx` binary into `/usr/libexec/docker/cli-plugins/` (Amazon Linux) or `/usr/lib/docker/cli-plugins/` (Ubuntu/Debian) from the [buildx releases page](https://github.com/docker/buildx/releases), then `chmod +x` it |
-| Node won't start / OOM | `docker compose logs node1`; confirm 8 GB, `free -h` |
+| Node won't start / OOM | `docker compose logs node1`; confirm 8 GB, `free -h`. The stack is now 9 containers (nginx + 2 gateways) |
 | k6 "network not found" | `docker network ls \| grep dhtnet` — `bench/run.sh` auto-detects this now; only needed if you have multiple `*_dhtnet` networks |
 | k6 all 401 | wrong `AUTH_PASS` — must match `.env` `AUTH_PASSWORD` |
 | Prometheus target DOWN | `curl localhost:9101/metrics` on the box |
 | Disk full mid-build | `df -h`; prometheus-cpp build needs ≥30 GB headroom |
+
+## Tunables added by Tier 4
+
+All optional — defaults are sane. Set in `docker-compose.yml` env or `.env`.
+
+| Var | Default | Meaning |
+|---|---|---|
+| `WORKER_THREADS` | 64 | server handler pool size (4.3); connection-bound |
+| `POOL_MAX_CONNS_PER_PEER` | 4 | per-peer connection pool cap (4.3) |
+| `POOL_IDLE_REAP_SECONDS` | 60 | idle pooled-connection TTL (4.3) |
+| `MAX_CLOCK_ENTRIES` | 20 | vector-clock bound (4.5). **Don't lower aggressively** — see `docs/decisions/tier-4.5.md` |
+| `VNODES` | 128 | must match the gateway's `cluster.virtual-nodes` |
+| `GATEWAY_REPLICAS` | 2 | gateway replicas behind nginx (4.4) |
+| `GOSSIP_*` | see `main.cpp` | SWIM period / timeout / K / suspicion (4.1) |
+
+## 11. Multi-host Swarm (optional)
+
+For the 5→100 scaling benchmark across several hosts — **this costs real money**
+(3–5 instances). Not needed for a normal demo.
+
+```bash
+# on the MANAGER host
+deploy/swarm/init-swarm.sh          # inits swarm + a published registry; prints the worker join cmd
+# ...run that join command on each WORKER, then back on the manager:
+deploy/swarm/deploy.sh              # builds + pushes images, deploys the stack
+docker node ls && docker stack services minidynamo
+
+tests/multi_host_smoke.sh           # proves the ring spans hosts + survives losing one
+bench/scale/scale_test.sh           # the 5..100 curve → paste into bench/scale/RESULTS.md
+
+deploy/swarm/deploy.sh down         # TEAR DOWN — then stop/terminate the instances
+```
+
+Swarm hosts must reach each other on `2377/tcp`, `7946/tcp+udp`, `4789/udp`
+(swarm hosts only — not the internet). The stack replaces node1/2/3 with one
+scalable `kvstore` service plus a 1-replica bootstrap `seed`; ring size is
+`replicas + 1`. Details: `docs/decisions/tier-4.5.md`.
 
 ## One-click redeploys
 
