@@ -10,14 +10,26 @@ independently mergeable; existing `scripts/e2e.sh` must stay green after each.
 | 4.1 | Gossip/SWIM membership + failure detection | ✅ merged |
 | 4.2 | Hinted handoff + Merkle anti-entropy | ✅ merged |
 | 4.3 | Connection pooling + thread pool + liveness-aware reads | ✅ merged (PR #6) |
-| 4.4 | Horizontal gateways + ring-aware routing | 🚧 in review |
-| 4.5 | Multi-host deploy + vector-clock pruning + scale benchmark | ⏳ planned (below) |
+| 4.4 | Horizontal gateways + ring-aware routing | ✅ merged (PR #7) |
+| 4.5 | Multi-host deploy + vector-clock pruning + scale benchmark | 🚧 code complete; benchmark pending a multi-host run |
 
-Per-tier design records live in `docs/decisions/tier-4.<n>.md`.
+Per-tier design records live in `docs/decisions/tier-4.<n>.md`; the approved
+implementation plans in `docs/plans/tier-4.<n>.md`.
+
+> **Deploying 4.4 + 4.5 together is a hard cutover.** 4.4 changed the ring hash and
+> 4.5 changed the vector-clock wire format. Both reshuffle/reinterpret stored data,
+> and a cluster must run a single build. Bring the stack down with
+> `docker compose down -v` (or redeploy the Swarm stack) so nodes start on a fresh
+> ring — a mixed-build cluster splits key placement.
 
 ---
 
 ## Tier 4.5 — Multi-Host Deploy + Vector-Clock Pruning + Scale Benchmark
+
+> **Status: code complete, benchmark pending.** Pruning and the Swarm stack are built and unit-tested;
+> the 5→100 curve needs an actual multi-host run to fill in `bench/scale/RESULTS.md`. Full design record
+> in `docs/decisions/tier-4.5.md`, approved plan in `docs/plans/tier-4.5.md`. The rest of this section is
+> kept as the tier's rationale and acceptance criteria.
 
 **What:** Deploy across multiple hosts (Docker Swarm), bound vector-clock growth, and produce a
 scaling-curve benchmark that demonstrates the architecture scales.
@@ -63,8 +75,10 @@ thousands of coordinators.
 ### Done when
 - Cluster operates correctly across multiple Swarm hosts (overlay network); gossip converges across
   host boundaries.
-- Vector clocks bounded to `MAX_CLOCK_ENTRIES` (verified after many distinct coordinators write a key);
-  a pruned clock never falsely dominates.
+- Vector clocks bounded to `MAX_CLOCK_ENTRIES` (verified after many distinct coordinators write a key),
+  and pruning degrades conservatively — a pruned clock surfaces siblings rather than silently picking a
+  winner. (Not an absolute guarantee: a false dominance is possible in principle, which is why the bound
+  is generous. See the honest write-up in `docs/decisions/tier-4.5.md`.)
 - Scaling curve shows near-linear throughput 5→100 nodes, bounded p99, gossip convergence within
   `O(log N)·T`, failure detection within the suspicion timeout regardless of size.
 - Results written up in `bench/scale/RESULTS.md`.

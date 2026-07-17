@@ -1,0 +1,164 @@
+# Multi-host Swarm stack (Tier 4.5). Deploy with deploy/swarm/deploy.sh, which
+# builds + pushes the images to a Swarm-published registry first (stack deploy
+# ignores `build:` — every host must be able to *pull* the image).
+#
+# The key difference from docker-compose.yml: nodes are no longer hand-declared
+# (node1/node2/node3). One `kvstore` service scales to N replicas, each deriving a
+# unique identity from Swarm's env templating. main.cpp already reads exactly these
+# vars (NODE_ID / ADVERTISE_HOST / NODE_PORT / SEED_NODES), so multi-host needs no
+# C++ change.
+version: "3.8"
+
+x-node-image: &node_image ${REGISTRY:-127.0.0.1:5000}/mini-dynamo-node:latest
+
+services:
+  # A dedicated bootstrap seed: one replica, no SEED_NODES, so it self-bootstraps
+  # the ring — the role node1 plays in docker-compose.yml.
+  #
+  # Why a separate service instead of SEED_NODES=tasks.kvstore:5001 on every
+  # replica: `tasks.<service>` resolves to ALL task IPs including the caller's own,
+  # so a replica can seed off *itself*, learn nothing, and stay invisible forever
+  # (gossip only probes peers it already knows). With ~1/N odds per replica that is
+  # near-certain at 100 nodes. Seeding off a *different* service makes
+  # self-resolution impossible. The seed is special only at join time — SWIM makes
+  # membership fully peer-to-peer afterwards, and the seed is an ordinary ring member.
+  seed:
+    image: *node_image
+    hostname: "{{.Task.Name}}"
+    environment:
+      NODE_ID: seed1
+      NODE_PORT: "5001"
+      METRICS_PORT: "9100"
+      ADVERTISE_HOST: "{{.Task.Name}}"
+      MAX_CLOCK_ENTRIES: "${MAX_CLOCK_ENTRIES:-20}"
+    networks:
+      - dhtnet
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]  # keep the seed's location predictable
+      restart_policy:
+        condition: any
+
+  # The cluster proper. Scale with: docker service scale <stack>_kvstore=N
+  # Total ring size is N + 1 (the seed is a member too).
+  kvstore:
+    image: *node_image
+    hostname: "{{.Task.Name}}"
+    environment:
+      NODE_ID: "node{{.Task.Slot}}"      # unique per replica
+      NODE_PORT: "5001"                  # same port everywhere: each task has its own overlay IP
+      METRICS_PORT: "9100"
+      ADVERTISE_HOST: "{{.Task.Name}}"   # per-task name, resolvable on the overlay
+      SEED_NODES: "tasks.seed:5001"
+      MAX_CLOCK_ENTRIES: "${MAX_CLOCK_ENTRIES:-20}"
+    networks:
+      - dhtnet
+    depends_on:
+      - seed
+    deploy:
+      replicas: ${KVSTORE_REPLICAS:-4}
+      restart_policy:
+        condition: any
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: minidynamo
+      POSTGRES_USER: minidynamo
+      POSTGRES_PASSWORD: minidynamo
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - dhtnet
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]  # a single volume must stay on one host
+
+  gateway:
+    image: ${REGISTRY:-127.0.0.1:5000}/mini-dynamo-gateway:latest
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/minidynamo
+      DB_USERNAME: minidynamo
+      DB_PASSWORD: minidynamo
+      # Seed list only — the gateway discovers the live ring via RING polling and
+      # routes each key to its primary owner (Tier 4.4).
+      CLUSTER_NODES: tasks.seed:5001
+      JWT_SECRET: ${JWT_SECRET:-dev-only-insecure-secret-change-me-please-0123456789}
+      AUTH_USERNAME: ${AUTH_USERNAME:-admin}
+      AUTH_PASSWORD: ${AUTH_PASSWORD:-changeme}
+      JAVA_TOOL_OPTIONS: ${JAVA_TOOL_OPTIONS:-}
+    networks:
+      - dhtnet
+    depends_on:
+      - postgres
+      - seed
+    deploy:
+      replicas: ${GATEWAY_REPLICAS:-2}
+
+  nginx:
+    image: nginx:1.27-alpine
+    configs:
+      - source: nginx_conf
+        target: /etc/nginx/nginx.conf
+    ports:
+      - "8080:80"
+    networks:
+      - dhtnet
+    depends_on:
+      - gateway
+    deploy:
+      replicas: 1
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    configs:
+      - source: prom_conf
+        target: /etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    networks:
+      - dhtnet
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    networks:
+      - dhtnet
+    depends_on:
+      - prometheus
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+
+# Configs are used instead of bind mounts: a bind mount only exists on the host
+# that has the file, but a Swarm service can land on any host.
+configs:
+  nginx_conf:
+    file: ../nginx/nginx.conf
+  prom_conf:
+    file: ./prometheus-swarm.yml
+
+networks:
+  dhtnet:
+    driver: overlay
+    attachable: true  # lets `docker run` (k6, debugging) join the overlay
+
+volumes:
+  pgdata:
+  grafana-data:
