@@ -68,6 +68,7 @@ Plain TCP, **length-prefixed framed** (`<byte-length>\n<payload>`), payload pipe
 | `REPLICATE\|<key>\|<b64value>\|<origin>\|<clock>` | `RESPONSE\|OK` (internal, coordinator→replica) |
 | `READ\|<key>\|<origin>` | `VAL\|<b64value>\|<clock>` or `VAL\|NOTFOUND` (internal) |
 | `RING\|<origin>` | `RING\n<count>\n<id>\|<host>\|<port>\n...` — read-only ring snapshot (the gateway polls this to route) |
+| `LEAVE\|<node_id>` | `RESPONSE\|OK\|left` or `RESPONSE\|ERROR\|<reason>` — **permanently** remove a node from the ring (administrative decommission, Tier 4.6). Send to any live node; the target need not participate. Distinct from gossip-detected death, which keeps the node in the ring |
 | `SWIM_PING` / `SWIM_PING_REQ` / `SWIM_ACK` / `SWIM_JOIN` | gossip membership + failure detection (internal, Tier 4.1) |
 | `JOIN\|<node_id>\|<value>\|<origin>\|<host>\|<port>` | `RING_UPDATE\n<count>\n<id>\|<host>\|<port>\n...` — legacy bootstrap join; gossip is the live path |
 

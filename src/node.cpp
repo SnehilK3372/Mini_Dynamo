@@ -91,6 +91,8 @@ void Node::handleRequest(const string &payload, int client_fd) {
         handleJoin(payload, client_fd);
     } else if (type == "RING") {
         handleRingQuery(client_fd);
+    } else if (type == "LEAVE") {
+        handleLeave(f, client_fd);
     } else if (type == "SWIM_PING" || type == "SWIM_PING_REQ" || type == "SWIM_ACK" ||
                type == "SWIM_JOIN") {
         if (gossip_) {
@@ -266,4 +268,32 @@ void Node::handleRingQuery(int client_fd) {
         oss << n.node_id << "|" << n.host << "|" << n.port << "\n";
     }
     reply(client_fd, oss.str());
+}
+
+// LEAVE|<node_id>  → permanently remove a node from the cluster.
+//
+// The operator's half of Dynamo's temporary-vs-permanent distinction. Gossip can
+// only ever conclude "unreachable", which is why an unreachable node keeps its
+// ring slots; deciding a node is gone FOR GOOD is a judgement no timeout can make,
+// so it arrives here instead.
+//
+// Send this to any live node, not to the target — the target is typically the one
+// that is already gone. That node tombstones the departure and gossips it out.
+void Node::handleLeave(const vector<string> &f, int client_fd) {
+    const string node_id = field(f, 1);
+    if (node_id.empty()) {
+        reply(client_fd, "RESPONSE|ERROR|missing_node_id");
+        return;
+    }
+    if (!gossip_) {
+        // Membership only exists when gossip is running; without it the ring is
+        // whatever JOIN built, and there is nothing to disseminate a Leave to.
+        reply(client_fd, "RESPONSE|ERROR|gossip_disabled");
+        return;
+    }
+    if (!gossip_->requestLeave(node_id)) {
+        reply(client_fd, "RESPONSE|ERROR|unknown_node");
+        return;
+    }
+    reply(client_fd, "RESPONSE|OK|left");
 }

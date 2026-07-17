@@ -12,9 +12,11 @@ independently mergeable; existing `scripts/e2e.sh` must stay green after each.
 | 4.3 | Connection pooling + thread pool + liveness-aware reads | ✅ merged (PR #6) |
 | 4.4 | Horizontal gateways + ring-aware routing | ✅ merged (PR #7) |
 | 4.5 | Multi-host deploy + vector-clock pruning + scale benchmark | 🚧 code complete; benchmark pending a multi-host run |
+| — | Testing tier: in-process cluster harness + vector-clock properties (found 3 live bugs) | ✅ merged (PR #10) |
+| 4.6 | Permanent node removal (administrative decommission) | ✅ code complete |
 
-Per-tier design records live in `docs/decisions/tier-4.<n>.md`; the approved
-implementation plans in `docs/plans/tier-4.<n>.md`.
+Per-tier design records live in `docs/decisions/tier-4.<n>.md` (plus
+`tier-testing.md`); the approved implementation plans in `docs/plans/tier-4.<n>.md`.
 
 > **What actually limits the system today** — from a code-level audit, not the design docs — is in
 > **[`scalability-constraints.md`](scalability-constraints.md)**. It supersedes the Tier-2 scaling

@@ -153,6 +153,35 @@ class InProcessCluster {
         g.reset();  // joins the thread outside the lock
     }
 
+    // Administratively retire a node (the LEAVE verb), permanently.
+    //
+    // Issued from a DIFFERENT node on purpose: that is how an operator uses it, and
+    // the target is typically the node that is already gone. `via` defaults to the
+    // first live node that is not the target.
+    //
+    // Returns what the LEAVE verb would return: false if the node is unknown.
+    bool decommission(const std::string &id, const std::string &via = "") {
+        NodeCtx &actor = via.empty() ? firstLiveOtherThan(id) : node(via);
+        auto g = actor.gossipRef();
+        if (!g) throw std::runtime_error("actor has no gossip thread: " + actor.info.node_id);
+        return g->requestLeave(id);
+    }
+
+    // Every live node holds `id` as Left.
+    bool waitForLeftEverywhere(const std::string &id, std::chrono::milliseconds timeout = 5s) {
+        return waitFor(
+            [&] {
+                for (auto &n : nodes_) {
+                    if (n->down.load() || n->info.node_id == id) continue;
+                    auto g = n->gossipRef();
+                    if (!g) return false;
+                    if (g->swim().stateOf(id) != gossip::MemberState::Left) return false;
+                }
+                return true;
+            },
+            timeout);
+    }
+
     // Simulate a process restart: a BRAND NEW GossipThread/Swim, so the node comes
     // back at *incarnation 0* — exactly what a fresh process does. This is the
     // whole point: a harness that reused the old Swim would keep the incarnation
@@ -254,6 +283,13 @@ class InProcessCluster {
    private:
     std::string seedEndpoint() const {
         return nodes_[0]->info.host + ":" + std::to_string(nodes_[0]->info.port);
+    }
+
+    NodeCtx &firstLiveOtherThan(const std::string &id) {
+        for (auto &n : nodes_) {
+            if (n->info.node_id != id && !n->down.load()) return *n;
+        }
+        throw std::runtime_error("no live node other than " + id);
     }
 
     std::shared_ptr<gossip::GossipThread> makeGossip(NodeCtx &n) {

@@ -1,5 +1,6 @@
 #include "gossip_thread.h"
 
+#include <optional>
 #include <sstream>
 
 #include "../log.h"
@@ -13,6 +14,10 @@ namespace {
 //   SWIM_PING_REQ|<sender_id>|<target_id>|<via_id>|<events>
 //   SWIM_ACK|<sender_id>|<target_id>|<events>
 //   SWIM_JOIN|<sender_id>|<host>|<port>|<incarnation>|<events>
+//
+// Departure has no SWIM_* verb of its own: the operator-facing LEAVE command
+// (Node::handleLeave) calls requestLeave() on whichever node it reached, and the
+// resulting Leave event rides the normal piggyback stream to everyone else.
 
 std::vector<std::string> split(const std::string &s, char delim) {
     std::vector<std::string> out;
@@ -58,12 +63,19 @@ GossipThread::GossipThread(const NodeInfo &self, Router *router, SendFn send_fn,
     //      never stored a single hint. Found by tests/cluster_test.cpp.
     // Liveness now lives where it belongs: in Swim, consulted per request via the
     // coordinator's is_alive_fn.
+    //
+    // A node that LEAVES is the other half of that distinction, and the one case
+    // that does change the ring: an operator has asserted the node is gone for
+    // good, which is a claim no failure detector can make on its own.
     swim_.onMemberChange([this](const NodeInfo &info, MemberState state) {
         if (state == MemberState::Alive) {
             router_->addPhysicalNode(info);
             jlog::op("info", "gossip", info.node_id, "added_to_ring");
         } else if (state == MemberState::Dead) {
             jlog::op("info", "gossip", info.node_id, "marked_dead_kept_in_ring");
+        } else if (state == MemberState::Left) {
+            router_->removePhysicalNode(info.node_id);
+            jlog::op("info", "gossip", info.node_id, "removed_from_ring_permanently");
         }
     });
 }
@@ -113,6 +125,16 @@ void GossipThread::joinViaSeeds(const std::vector<std::string> &seeds) {
     jlog::msg("warn", "gossip: failed to contact any seed node");
 }
 
+bool GossipThread::requestLeave(const std::string &node_id) {
+    // Report unknown rather than silently tombstoning a typo'd id: a Leave for a
+    // name nobody holds would gossip out and pre-emptively bar a node that
+    // legitimately joins under that id later.
+    if (!swim_.stateOf(node_id)) return false;
+    swim_.leave(node_id);  // idempotent: a second LEAVE is a quiet no-op
+    jlog::op("info", "gossip", node_id, "leave_requested");
+    return true;
+}
+
 void GossipThread::run() {
     while (running_) {
         tick();
@@ -121,6 +143,10 @@ void GossipThread::run() {
 }
 
 void GossipThread::tick() {
+    // A retired node stops probing: it has no ring slots and no say in membership,
+    // and its pings would only feed peers events from a view they have tombstoned.
+    if (swim_.hasLeft()) return;
+
     // 1. Expire suspects that have timed out.
     auto suspicion_timeout = config_.protocol_period * config_.suspicion_mult;
     swim_.expireSuspects(suspicion_timeout);
@@ -235,7 +261,26 @@ std::string GossipThread::handleMessage(const std::string &payload) {
         join_ev.host = host;
         join_ev.port = port;
         join_ev.incarnation = incarnation;
-        uint64_t eff = swim_.applyDirectJoin(join_ev);
+        std::optional<uint64_t> eff = swim_.applyDirectJoin(join_ev);
+
+        if (!eff) {
+            // The joiner has been decommissioned. Answer with a Leave naming it and
+            // nothing else: applying that event trips the joiner's own self-Leave
+            // branch, so it retires itself instead of retrying forever under the
+            // impression it is a cluster member. Telling it beats stonewalling it.
+            //
+            // Critically, we disseminate NO Alive for it. Broadcasting one would be
+            // ignored by peers holding the tombstone but honoured by any that do
+            // not, quietly reviving a departed node in part of the cluster.
+            MemberEvent leave_ev;
+            leave_ev.type = EventType::Leave;
+            leave_ev.node_id = sender_id;
+            jlog::op("info", "gossip", sender_id, "join_refused_node_departed");
+            std::ostringstream refused;
+            refused << "SWIM_ACK|" << self_.node_id << "|" << sender_id << "|"
+                    << serializeEvents({leave_ev});
+            return refused.str();
+        }
 
         // Disseminate the revival as Alive at the *effective* incarnation, which
         // applyDirectJoin bumped past whatever we held. Re-broadcasting the join's
@@ -243,7 +288,7 @@ std::string GossipThread::handleMessage(const std::string &payload) {
         // still holding the node Dead — it would rejoin for us and nobody else.
         MemberEvent alive_ev = join_ev;
         alive_ev.type = EventType::Alive;
-        alive_ev.incarnation = eff;
+        alive_ev.incarnation = *eff;
         swim_.enqueueEvent(alive_ev);
 
         // Reply with an ACK that carries our full membership as events so the

@@ -196,12 +196,22 @@ int main() {
     HandoffThread handoff(&hint_store, deliver_fn);
     handoff.start();
 
-    // Register gossip callback: on recovery (Dead→Alive), notify handoff.
-    gossip.swim().onMemberChange([&handoff](const NodeInfo &info, gossip::MemberState state) {
-        if (state == gossip::MemberState::Alive) {
-            handoff.notifyRecovery(info);
-        }
-    });
+    // Register gossip callback: on recovery (Dead→Alive), notify handoff. On
+    // permanent removal, discard the target's hints — they can never be delivered
+    // (delivery fires on Dead→Alive, which a departed node can no longer make), so
+    // they would otherwise just sit in memory until the TTL swept them.
+    gossip.swim().onMemberChange(
+        [&handoff, &hint_store](const NodeInfo &info, gossip::MemberState state) {
+            if (state == gossip::MemberState::Alive) {
+                handoff.notifyRecovery(info);
+            } else if (state == gossip::MemberState::Left) {
+                size_t dropped = hint_store.dropTarget(info.node_id);
+                if (dropped > 0) {
+                    jlog::op("info", "hints", info.node_id,
+                             "dropped_" + to_string(dropped) + "_hints_node_departed");
+                }
+            }
+        });
 
     // Inject hint store + liveness check into the coordinator (via the node's
     // public access). The coordinator uses these for sloppy quorum writes.

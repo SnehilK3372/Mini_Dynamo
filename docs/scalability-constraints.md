@@ -26,16 +26,29 @@ been run, so `bench/scale/RESULTS.md` is empty.
 
 ## 2. Real constraints today
 
-### 2.0 A permanently-dead node keeps its ring slots forever
-Since the testing tier, gossip-detected death no longer evicts a node from the ring — that is correct
-(a *temporary* failure must not reshuffle key ownership, and evicting made hinted handoff unreachable;
-see `docs/decisions/tier-testing.md`). The consequence to accept: a node that is gone **permanently**
-still holds its vnodes, so its keys are served by stand-ins whose hints expire after `HINT_TTL_SECONDS`
-(3h), leaving those keys under-replicated indefinitely.
+### 2.0 Permanent removal recovers ownership, but not data placement
+Gossip-detected death does not evict a node from the ring — correct, because a *temporary* failure must
+not reshuffle key ownership, and evicting made hinted handoff unreachable (`docs/decisions/tier-testing.md`).
+Tier 4.6 adds the other half of Dynamo's distinction: an **administrative removal** (`LEAVE|<node_id>`,
+`docs/decisions/tier-4.6.md`) that deliberately surrenders a departed node's ring slots via the terminal
+`MemberState::Left` tombstone. So a permanently-dead node no longer holds its vnodes forever.
 
-Dynamo separates this out as an **administrative removal**, and this system has no such path yet:
-`EventType::Leave` exists in the enum but nothing emits it. *Fix:* a `LEAVE`/decommission command that
-removes a node from the ring deliberately. Until then, permanent departures need a manual redeploy.
+What remains, and must be accepted:
+- **Ownership moves; data does not follow.** Removal hands the departed node's key ranges to the right
+  new owners, but they hold nothing for those keys until something populates them. Read repair heals
+  only keys that are *read*; hinted handoff heals only the outage the coordinator noticed. The general
+  mechanism that would stream the ranges is **anti-entropy, still stubbed** (§2.1). So after a
+  decommission, unread keys stay under-replicated until read. Strictly better than the pre-4.6 state
+  (permanently-wrong ownership), not good.
+- **Tombstones are in-memory.** A decommission is forgotten only if *every* node restarts at once —
+  narrow, since a permanently-dead node never returns and a fresh node learns membership from peers that
+  exclude `Left`. The real exposure is retiring a node that is still running, then restarting the whole
+  cluster. Persisting tombstones needs a metadata column family + a GC story and was deferred.
+- **Do not decommission the live seed.** If the target is still running *and* is the seed, new joiners
+  learn a ring containing it (it answers their JOIN) while existing nodes hold the tombstone — a split
+  view. Retire the seed only when it is down, or after repointing `SEED_NODES`.
+- **Blast radius.** `LEAVE` lives on the node's internal port, which already accepts arbitrary
+  `REPLICATE` writes — no new trust boundary, but a more destructive verb on an unauthenticated surface.
 
 ### 2.1 Anti-entropy is not wired across nodes — **the biggest functional gap**
 `MerkleTree` is implemented and unit-tested, but `exchange_fn`/`pull_fn` in `src/main.cpp` are

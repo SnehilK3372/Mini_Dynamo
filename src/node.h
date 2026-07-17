@@ -59,6 +59,7 @@ class Node {
     void handleReadReplica(const vector<string> &f, int client_fd);  // coordinator→replica read
     void handleJoin(const string &payload, int client_fd);
     void handleRingQuery(int client_fd);  // read-only ring snapshot (does not mutate the ring)
+    void handleLeave(const vector<string> &f, int client_fd);  // administrative permanent removal
 
     int effN(int requested) const { return requested > 0 ? requested : cfg_.N; }
     int effW(int requested) const { return requested > 0 ? requested : cfg_.W; }

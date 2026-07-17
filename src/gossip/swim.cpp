@@ -20,6 +20,17 @@ bool Swim::applyEvent(const MemberEvent &event) {
 
     // Self-related events: if someone suspects us, refute.
     if (event.node_id == self_.node_id) {
+        if (event.type == EventType::Leave) {
+            // The one thing we do NOT argue with. Suspect/Dead about us are
+            // *inferences* a healthy node is entitled to refute; a Leave is an
+            // operator's decision, and a node refuting its own retirement would
+            // make decommission impossible for any node still running — exactly
+            // the case where you need it to work.
+            if (self_left_) return false;  // already retired: stop re-disseminating
+            self_left_ = true;
+            fireCallbacks(self_, MemberState::Left);  // drop ourselves from our own ring
+            return true;                              // pass the order on, once
+        }
         if (event.type == EventType::Suspect || event.type == EventType::Dead) {
             if (event.incarnation < incarnation_) {
                 // Stale suspicion — it targets an older incarnation we have
@@ -57,6 +68,13 @@ bool Swim::applyEvent(const MemberEvent &event) {
                 fireCallbacks(entry.info, MemberState::Alive);
                 return true;
             }
+            // A departed node stays departed. Checked BEFORE the incarnation
+            // comparison because the tombstone outranks incarnation entirely: a
+            // decommissioned node that is still running keeps gossiping Alive, and
+            // will happily refute its way to an arbitrarily high incarnation. No
+            // incarnation may buy its way back in.
+            if (it->second.state == MemberState::Left) return false;
+
             // Everything here is RELAYED gossip — a third party telling us about
             // someone else — so it only wins with a STRICTLY newer incarnation,
             // whatever state we hold. (The join handshake, where the node speaks
@@ -87,6 +105,7 @@ bool Swim::applyEvent(const MemberEvent &event) {
             // A suspect with a higher incarnation overrides alive.
             if (event.incarnation < it->second.incarnation) return false;
             if (it->second.state == MemberState::Dead) return false;
+            if (it->second.state == MemberState::Left) return false;  // terminal
             if (it->second.state == MemberState::Suspect &&
                 event.incarnation <= it->second.incarnation) {
                 return false;
@@ -97,14 +116,50 @@ bool Swim::applyEvent(const MemberEvent &event) {
             return true;
         }
 
-        case EventType::Dead:
-        case EventType::Leave: {
+        case EventType::Dead: {
             if (it == members_.end()) return false;
             if (it->second.state == MemberState::Dead) return false;
+            if (it->second.state == MemberState::Left) return false;  // terminal
             if (event.incarnation < it->second.incarnation) return false;
             it->second.state = MemberState::Dead;
             it->second.incarnation = event.incarnation;
             fireCallbacks(it->second.info, MemberState::Dead);
+            return true;
+        }
+
+        case EventType::Leave: {
+            // Deliberately NOT a synonym for Dead, and deliberately not gated on
+            // incarnation — the two differences that make this whole tier work.
+            //
+            //   - Not Dead: Dead keeps the node's ring slots (a transient failure
+            //     must not reshuffle ownership); Leave surrenders them. The
+            //     Left callback is what evicts it from the ring.
+            //   - Not gated: every other event loses to a newer incarnation. An
+            //     operator's decision is not a stale observation to be outvoted,
+            //     and gating it would make decommission fail against a flapping
+            //     node — the very node you are trying to retire.
+            //
+            // Terminal, so it converges: the first Leave changes state and is
+            // re-disseminated, every later one returns false and dies out.
+            if (it == members_.end()) {
+                // We have never heard of this node — record the tombstone anyway,
+                // rather than dropping the event. Otherwise a Leave that overtakes
+                // the Alive it refers to (possible during a join race, since both
+                // are racing through the same dissemination stream) would leave us
+                // with no tombstone, and the trailing Alive would add a departed
+                // node to our ring alone. host/port are empty on a Leave and are
+                // never needed: a Left entry is excluded from every peer-selection
+                // path and exists only to be checked.
+                MemberEntry entry;
+                entry.info = {event.node_id, event.host, event.port};
+                entry.state = MemberState::Left;
+                entry.incarnation = event.incarnation;
+                members_[event.node_id] = entry;
+                return true;  // relay it onward; nothing to evict locally
+            }
+            if (it->second.state == MemberState::Left) return false;
+            it->second.state = MemberState::Left;
+            fireCallbacks(it->second.info, MemberState::Left);
             return true;
         }
 
@@ -113,7 +168,7 @@ bool Swim::applyEvent(const MemberEvent &event) {
     }
 }
 
-uint64_t Swim::applyDirectJoin(const MemberEvent &event) {
+std::optional<uint64_t> Swim::applyDirectJoin(const MemberEvent &event) {
     std::lock_guard<std::mutex> lk(mtx_);
     if (event.node_id == self_.node_id) return incarnation_;  // never about ourselves
 
@@ -127,6 +182,18 @@ uint64_t Swim::applyDirectJoin(const MemberEvent &event) {
         fireCallbacks(entry.info, MemberState::Alive);
         return event.incarnation;
     }
+
+    // Believe a node about its own liveness — EXCEPT when it has been retired.
+    //
+    // This is the one check the whole decommission design rests on. Everywhere
+    // else, a stale revival is stopped by the incarnation guard; here there is no
+    // incarnation guard by design (a restarted process returns at 0 and must still
+    // be believed — that is the Tier-testing rejoin fix). So without this line a
+    // decommissioned node that is merely *restarted* would hand itself straight
+    // back into the ring, and the operator's decision would silently evaporate.
+    //
+    // nullopt, not an incarnation: the caller must disseminate nothing at all.
+    if (it->second.state == MemberState::Left) return std::nullopt;
 
     // The node is telling us directly that it is up, so believe it. Bump past any
     // record we hold, so the Alive we disseminate is strictly newer than the
@@ -142,6 +209,43 @@ uint64_t Swim::applyDirectJoin(const MemberEvent &event) {
     }
     if (changed) fireCallbacks(it->second.info, MemberState::Alive);
     return eff;
+}
+
+void Swim::leave(const std::string &node_id) {
+    std::lock_guard<std::mutex> lk(mtx_);
+
+    MemberEvent ev;
+    ev.type = EventType::Leave;
+    ev.node_id = node_id;
+
+    // Retiring ourselves: there is no members_ entry for self, so the flag is the
+    // whole state. Peers learn from the disseminated event.
+    if (node_id == self_.node_id) {
+        if (self_left_) return;
+        self_left_ = true;
+        ev.incarnation = incarnation_;
+        pending_events_.push_back({ev, disseminationLimit()});
+        fireCallbacks(self_, MemberState::Left);
+        return;
+    }
+
+    auto it = members_.find(node_id);
+    if (it == members_.end()) return;                   // unknown node: nothing to retire
+    if (it->second.state == MemberState::Left) return;  // already done, stay quiet
+
+    // No incarnation or state guard: an operator may retire a node we hold Alive,
+    // Suspect or Dead. Dead is in fact the common case — reclaiming the ring slots
+    // of a node that is never coming back is the reason this exists.
+    it->second.state = MemberState::Left;
+    ev.incarnation = it->second.incarnation;
+    pending_events_.push_back({ev, disseminationLimit()});
+
+    fireCallbacks(it->second.info, MemberState::Left);
+}
+
+bool Swim::hasLeft() const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    return self_left_;
 }
 
 void Swim::suspect(const std::string &node_id) {
@@ -163,6 +267,9 @@ void Swim::confirmDead(const std::string &node_id) {
     std::lock_guard<std::mutex> lk(mtx_);
     auto it = members_.find(node_id);
     if (it == members_.end() || it->second.state == MemberState::Dead) return;
+    // Left is terminal, and demoting it to Dead would put the node back in the
+    // ring on the next Alive it manages to get accepted.
+    if (it->second.state == MemberState::Left) return;
 
     it->second.state = MemberState::Dead;
 
@@ -190,7 +297,7 @@ std::vector<MemberEntry> Swim::allMembers() const {
     std::lock_guard<std::mutex> lk(mtx_);
     std::vector<MemberEntry> out;
     for (const auto &[id, entry] : members_) {
-        if (entry.state != MemberState::Dead) {
+        if (entry.state != MemberState::Dead && entry.state != MemberState::Left) {
             out.push_back(entry);
         }
     }
@@ -201,7 +308,7 @@ std::vector<NodeInfo> Swim::randomPeers(int k, const std::vector<std::string> &e
     std::lock_guard<std::mutex> lk(mtx_);
     std::vector<NodeInfo> candidates;
     for (const auto &[id, entry] : members_) {
-        if (entry.state == MemberState::Dead) continue;
+        if (entry.state == MemberState::Dead || entry.state == MemberState::Left) continue;
         if (std::find(exclude.begin(), exclude.end(), id) != exclude.end()) continue;
         candidates.push_back(entry.info);
     }
@@ -250,6 +357,16 @@ bool Swim::isAlive(const std::string &node_id) const {
     return it->second.state == MemberState::Alive || it->second.state == MemberState::Suspect;
 }
 
+std::optional<MemberState> Swim::stateOf(const std::string &node_id) const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (node_id == self_.node_id) {
+        return self_left_ ? MemberState::Left : MemberState::Alive;
+    }
+    auto it = members_.find(node_id);
+    if (it == members_.end()) return std::nullopt;
+    return it->second.state;
+}
+
 std::vector<std::string> Swim::expireSuspects(std::chrono::milliseconds suspicion_timeout) {
     std::lock_guard<std::mutex> lk(mtx_);
     std::vector<std::string> expired;
@@ -279,7 +396,7 @@ size_t Swim::memberCount() const {
     std::lock_guard<std::mutex> lk(mtx_);
     size_t count = 0;
     for (const auto &[id, entry] : members_) {
-        if (entry.state != MemberState::Dead) ++count;
+        if (entry.state != MemberState::Dead && entry.state != MemberState::Left) ++count;
     }
     return count;
 }

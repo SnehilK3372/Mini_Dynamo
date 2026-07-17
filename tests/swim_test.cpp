@@ -196,12 +196,13 @@ TEST_F(SwimTest, RestartedNodeRejoinsAtSameIncarnation) {
     rejoin.port = 5002;
     rejoin.incarnation = 0;  // NOT higher — a fresh process
 
-    uint64_t eff = swim.applyDirectJoin(rejoin);
+    auto eff = swim.applyDirectJoin(rejoin);
+    ASSERT_TRUE(eff.has_value()) << "a plain Dead node's join must be accepted";
     EXPECT_TRUE(swim.isAlive("node2")) << "a restarted node must be able to rejoin";
     // The reviver must bump past its own stale Dead record, or peers still holding
     // Dead@0 would reject the relayed Alive@0 and the node would rejoin for this
     // node only — invisible to the rest of the cluster.
-    EXPECT_GT(eff, 0u) << "the effective incarnation must beat the stale Dead record";
+    EXPECT_GT(*eff, 0u) << "the effective incarnation must beat the stale Dead record";
 }
 
 // The flip side: relayed gossip is NOT authoritative. A Join event forwarded by a
@@ -455,4 +456,280 @@ TEST_F(SwimTest, CallbackFiredOnJoinAndDeath) {
     EXPECT_EQ(changes[0].second, MemberState::Alive);
     EXPECT_EQ(changes[1].first, "node2");
     EXPECT_EQ(changes[1].second, MemberState::Dead);
+}
+
+// ---- Permanent removal (Tier 4.6) ---------------------------------------
+//
+// The tombstone rules. Every test below exists because some path could otherwise
+// undo an operator's decision, and the feature is worthless if a decommissioned
+// node can find ANY way back into the ring.
+
+namespace {
+
+void addMember(Swim &s, const std::string &id, uint64_t incarnation = 0) {
+    MemberEvent join;
+    join.type = EventType::Join;
+    join.node_id = id;
+    join.host = "host-" + id;
+    join.port = 5002;
+    join.incarnation = incarnation;
+    s.applyEvent(join);
+}
+
+MemberEvent leaveEvent(const std::string &id, uint64_t incarnation = 0) {
+    MemberEvent ev;
+    ev.type = EventType::Leave;
+    ev.node_id = id;
+    ev.incarnation = incarnation;
+    return ev;
+}
+
+}  // namespace
+
+TEST_F(SwimTest, LeaveRemovesFromMembership) {
+    addMember(swim, "node2");
+    ASSERT_EQ(swim.memberCount(), 1u);
+
+    swim.leave("node2");
+
+    EXPECT_EQ(swim.stateOf("node2"), MemberState::Left);
+    EXPECT_FALSE(swim.isAlive("node2"));
+    EXPECT_EQ(swim.memberCount(), 0u) << "a departed node must not count as a member";
+    EXPECT_TRUE(swim.allMembers().empty())
+        << "a departed node must not be advertised to joiners — that is what stops a "
+           "fresh node from learning about it and re-adding it";
+}
+
+// THE CRUX. applyDirectJoin is deliberately not gated on incarnation (a restarted
+// process returns at 0 and must still be believed — the Tier-testing rejoin fix),
+// so the tombstone is the ONLY thing between a decommissioned node and the ring.
+// If this ever fails, decommission silently does nothing the moment its target
+// reboots.
+TEST_F(SwimTest, LeaveIsStickyAgainstDirectJoin) {
+    addMember(swim, "node2");
+    swim.leave("node2");
+
+    // The decommissioned node restarts and announces itself through the handshake,
+    // exactly as a legitimately restarting node would.
+    MemberEvent rejoin;
+    rejoin.type = EventType::Join;
+    rejoin.node_id = "node2";
+    rejoin.host = "host-node2";
+    rejoin.port = 5002;
+    rejoin.incarnation = 0;
+
+    auto eff = swim.applyDirectJoin(rejoin);
+
+    EXPECT_FALSE(eff.has_value())
+        << "a refused join must return nullopt so the caller disseminates NO Alive — an "
+           "Alive here would be rejected by peers holding the tombstone but accepted by "
+           "any that do not, reviving the node in part of the cluster";
+    EXPECT_EQ(swim.stateOf("node2"), MemberState::Left);
+    EXPECT_FALSE(swim.isAlive("node2")) << "a decommissioned node must not rejoin";
+}
+
+// The contrast that gives the test above its meaning: the SAME handshake, at the
+// SAME incarnation, against a merely-Dead node MUST succeed. Dead and Left differ
+// in exactly this. Without the pair, LeaveIsStickyAgainstDirectJoin would also pass
+// if applyDirectJoin were broken outright.
+TEST_F(SwimTest, DirectJoinStillRevivesAMerelyDeadNode) {
+    addMember(swim, "node2");
+    swim.confirmDead("node2");
+
+    MemberEvent rejoin;
+    rejoin.type = EventType::Join;
+    rejoin.node_id = "node2";
+    rejoin.host = "host-node2";
+    rejoin.port = 5002;
+    rejoin.incarnation = 0;
+
+    EXPECT_TRUE(swim.applyDirectJoin(rejoin).has_value())
+        << "Dead is a temporary failure — a restart must still bring it back";
+    EXPECT_TRUE(swim.isAlive("node2"));
+}
+
+// A decommissioned node that is still RUNNING keeps gossiping, and refutes its way
+// to ever-higher incarnations. No incarnation may buy it back in.
+TEST_F(SwimTest, LeaveIsStickyAgainstRelayedAlive) {
+    addMember(swim, "node2");
+    swim.leave("node2");
+
+    MemberEvent alive;
+    alive.type = EventType::Alive;
+    alive.node_id = "node2";
+    alive.host = "host-node2";
+    alive.port = 5002;
+    alive.incarnation = 9999;  // absurdly newer, and still not enough
+
+    EXPECT_FALSE(swim.applyEvent(alive))
+        << "the tombstone outranks incarnation entirely; it is not a staleness check";
+    EXPECT_EQ(swim.stateOf("node2"), MemberState::Left);
+    EXPECT_FALSE(swim.isAlive("node2"));
+}
+
+// An operator's decision is not a stale observation to be outvoted. Gating Leave on
+// incarnation would make decommission fail against a node whose incarnation races
+// ahead — a flapping node, which is the one you most want to retire.
+TEST_F(SwimTest, LeaveWinsRegardlessOfIncarnation) {
+    addMember(swim, "node2", /*incarnation=*/9);
+
+    EXPECT_TRUE(swim.applyEvent(leaveEvent("node2", /*incarnation=*/0)))
+        << "a Leave at incarnation 0 must still retire a member held at 9";
+    EXPECT_EQ(swim.stateOf("node2"), MemberState::Left);
+}
+
+// The common case: reclaiming the ring slots of a node that is already gone.
+TEST_F(SwimTest, LeaveWorksOnAnAlreadyDeadNode) {
+    addMember(swim, "node2");
+    swim.confirmDead("node2");
+    ASSERT_EQ(swim.stateOf("node2"), MemberState::Dead);
+
+    swim.leave("node2");
+    EXPECT_EQ(swim.stateOf("node2"), MemberState::Left)
+        << "Dead -> Left is the whole point: a Dead node keeps its ring slots forever "
+           "until someone declares it permanently gone";
+}
+
+// Left is terminal in both directions: nothing may demote it to a revivable state,
+// or the next accepted Alive would put it back in the ring.
+TEST_F(SwimTest, LeaveIsTerminalAgainstSuspectAndDead) {
+    addMember(swim, "node2");
+    swim.leave("node2");
+
+    EXPECT_FALSE(swim.applyEvent(leaveEvent("node2")))
+        << "a repeated Leave must not re-fire, or it would gossip forever";
+
+    MemberEvent suspect;
+    suspect.type = EventType::Suspect;
+    suspect.node_id = "node2";
+    suspect.incarnation = 50;
+    EXPECT_FALSE(swim.applyEvent(suspect));
+    EXPECT_EQ(swim.stateOf("node2"), MemberState::Left);
+
+    MemberEvent dead;
+    dead.type = EventType::Dead;
+    dead.node_id = "node2";
+    dead.incarnation = 50;
+    EXPECT_FALSE(swim.applyEvent(dead));
+    EXPECT_EQ(swim.stateOf("node2"), MemberState::Left);
+
+    swim.confirmDead("node2");
+    EXPECT_EQ(swim.stateOf("node2"), MemberState::Left) << "confirmDead must not demote Left";
+}
+
+// A Leave can overtake the Alive it refers to, since both race through the same
+// dissemination stream. Recording a tombstone for a node we have never heard of is
+// what stops the trailing Alive from adding a departed node to our ring alone.
+TEST_F(SwimTest, LeaveForAnUnknownNodeStillTombstones) {
+    EXPECT_TRUE(swim.applyEvent(leaveEvent("ghost")))
+        << "the event must be recorded and relayed, not dropped";
+    EXPECT_EQ(swim.stateOf("ghost"), MemberState::Left);
+
+    MemberEvent late_alive;
+    late_alive.type = EventType::Alive;
+    late_alive.node_id = "ghost";
+    late_alive.host = "host-ghost";
+    late_alive.port = 5009;
+    late_alive.incarnation = 3;
+    EXPECT_FALSE(swim.applyEvent(late_alive)) << "the trailing Alive must lose to the tombstone";
+    EXPECT_EQ(swim.memberCount(), 0u);
+}
+
+// Suspect and Dead about ourselves are inferences a healthy node is entitled to
+// refute. A Leave is not an inference — it is a decision, and refuting it would make
+// it impossible to retire any node that is still running.
+TEST_F(SwimTest, LeaveAboutSelfIsNotRefuted) {
+    uint64_t before = swim.incarnation();
+    ASSERT_FALSE(swim.hasLeft());
+
+    // Returning true is precisely how an applied event asks to be re-disseminated:
+    // applyIncomingEvents re-enqueues whatever changed state. (Swim::leave() is the
+    // other path and enqueues directly — see SelfLeaveEnqueuesItsOwnDissemination.)
+    EXPECT_TRUE(swim.applyEvent(leaveEvent(self.node_id, before)))
+        << "the order must be applied and relayed onward";
+
+    EXPECT_TRUE(swim.hasLeft());
+    EXPECT_EQ(swim.incarnation(), before)
+        << "refuting would bump the incarnation and broadcast Alive — the exact fight a "
+           "node must not pick with its own retirement";
+
+    EXPECT_FALSE(swim.applyEvent(leaveEvent(self.node_id, before)))
+        << "a repeated self-Leave must not re-fire, or it would gossip forever";
+}
+
+// The self-Leave that ORIGINATES here (an operator ran LEAVE against this very
+// node) has no incoming event to be relayed, so it must enqueue its own — else the
+// node retires in silence and every peer keeps routing keys to it.
+TEST_F(SwimTest, SelfLeaveEnqueuesItsOwnDissemination) {
+    swim.leave(self.node_id);
+
+    auto events = swim.getEventsToSend();
+    ASSERT_FALSE(events.empty()) << "peers would never learn of the departure";
+    EXPECT_EQ(events[0].type, EventType::Leave);
+    EXPECT_EQ(events[0].node_id, self.node_id);
+}
+
+// Contrast: self-suspicion IS still refuted. Pins that the branch above is
+// special-cased on Leave, rather than self-refutation having broken.
+TEST_F(SwimTest, SelfSuspicionIsStillRefutedAfterLeaveHandling) {
+    uint64_t before = swim.incarnation();
+    MemberEvent suspect;
+    suspect.type = EventType::Suspect;
+    suspect.node_id = self.node_id;
+    suspect.incarnation = before;
+
+    EXPECT_TRUE(swim.applyEvent(suspect));
+    EXPECT_GT(swim.incarnation(), before) << "a healthy node must still refute suspicion";
+    EXPECT_FALSE(swim.hasLeft());
+}
+
+TEST_F(SwimTest, SelfLeaveFiresCallbackSoTheNodeDropsItselfFromItsOwnRing) {
+    std::vector<std::pair<std::string, MemberState>> changes;
+    swim.onMemberChange([&](const NodeInfo &info, MemberState st) {
+        changes.push_back({info.node_id, st});
+    });
+
+    swim.leave(self.node_id);
+
+    ASSERT_EQ(changes.size(), 1u);
+    EXPECT_EQ(changes[0].first, self.node_id);
+    EXPECT_EQ(changes[0].second, MemberState::Left)
+        << "without this the retired node keeps serving from a ring it is no longer in";
+    EXPECT_TRUE(swim.hasLeft());
+}
+
+TEST_F(SwimTest, LeaveFiresCallbackForRingEviction) {
+    addMember(swim, "node2");
+    std::vector<std::pair<std::string, MemberState>> changes;
+    swim.onMemberChange([&](const NodeInfo &info, MemberState st) {
+        changes.push_back({info.node_id, st});
+    });
+
+    swim.leave("node2");
+
+    ASSERT_EQ(changes.size(), 1u);
+    EXPECT_EQ(changes[0].first, "node2");
+    EXPECT_EQ(changes[0].second, MemberState::Left);
+}
+
+TEST_F(SwimTest, LeaveExcludesFromPeerSelection) {
+    for (int i = 2; i <= 4; ++i) addMember(swim, "node" + std::to_string(i));
+    swim.leave("node3");
+
+    for (const auto &p : swim.alivePeers()) {
+        EXPECT_NE(p.node_id, "node3") << "a departed node must never be probed";
+    }
+    for (const auto &p : swim.randomPeers(10)) {
+        EXPECT_NE(p.node_id, "node3") << "a departed node must never be an indirect-probe proxy";
+    }
+}
+
+TEST_F(SwimTest, StateOfDistinguishesDepartedFromUnknown) {
+    addMember(swim, "node2");
+    swim.leave("node2");
+
+    EXPECT_EQ(swim.stateOf("node2"), MemberState::Left);
+    EXPECT_FALSE(swim.stateOf("never-heard-of-it").has_value())
+        << "the LEAVE verb rejects unknown ids on this distinction — tombstoning a typo "
+           "would pre-emptively bar a node that legitimately joins under that id later";
 }

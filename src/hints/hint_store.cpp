@@ -22,6 +22,15 @@ std::vector<Hint> HintStore::drain(const std::string &target_node_id) {
     return out;
 }
 
+size_t HintStore::dropTarget(const std::string &target_node_id) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    auto it = hints_.find(target_node_id);
+    if (it == hints_.end()) return 0;
+    size_t n = it->second.size();
+    hints_.erase(it);
+    return n;
+}
+
 void HintStore::expireOld() {
     std::lock_guard<std::mutex> lk(mtx_);
     auto now = std::chrono::steady_clock::now();
