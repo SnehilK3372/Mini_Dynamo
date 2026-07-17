@@ -12,6 +12,7 @@
 #include "net/framing.h"
 #include "net/tcp_client.h"
 #include "net/tcp_replica_client.h"
+#include "replica_ops.h"
 #include "router.h"
 
 using namespace std;
@@ -208,39 +209,27 @@ void Node::handleDelete(const vector<string> &f, const string &rawPayload, int c
 }
 
 // REPLICATE|<key>|<b64value>|<origin>|<clock>  (coordinator -> replica write)
+// The never-regress rule itself lives in replica_ops so the in-process test
+// cluster exercises this exact code rather than a copy of it.
 void Node::handleReplicate(const vector<string> &f, int client_fd) {
     const string key = field(f, 1);
     VersionedValue incoming{base64::decode(field(f, 2)), VectorClock::parse(field(f, 4))};
 
-    // Never regress: if we already hold a version that strictly dominates the
-    // incoming one, this is a stale/duplicate replicate — acknowledge it (our
-    // copy is at least as new) but keep ours. Otherwise store the incoming
-    // version. Concurrent versions across *different* replicas are surfaced as
-    // siblings at read time; a single replica keeps one value (full per-replica
-    // sibling storage is deferred with anti-entropy).
-    auto stored = storage_->get(key);
-    if (stored) {
-        VersionedValue local = VersionedValue::deserialize(*stored);
-        if (VectorClock::compare(local.clock, incoming.clock) ==
-            VectorClock::Ordering::A_DOMINATES) {
-            reply(client_fd, "RESPONSE|OK");
-            return;
-        }
-    }
-    storage_->put(key, incoming.serialize());
+    replica_ops::applyReplicate(*storage_, key, incoming);
+    // Ack either way: whether we stored the incoming version or kept a strictly
+    // newer local one, our copy is at least as new as the coordinator's.
     reply(client_fd, "RESPONSE|OK");
 }
 
 // READ|<key>|<origin>  (coordinator -> replica read)
 void Node::handleReadReplica(const vector<string> &f, int client_fd) {
     const string key = field(f, 1);
-    auto stored = storage_->get(key);
-    if (!stored) {
+    auto v = replica_ops::readLocal(*storage_, key);
+    if (!v) {
         reply(client_fd, "VAL|NOTFOUND");
         return;
     }
-    VersionedValue v = VersionedValue::deserialize(*stored);
-    reply(client_fd, "VAL|" + base64::encode(v.data) + "|" + v.clock.serialize());
+    reply(client_fd, "VAL|" + base64::encode(v->data) + "|" + v->clock.serialize());
 }
 
 // JOIN|<id>|<port>|<origin>|<host>|<port>  → reply with the current ring.

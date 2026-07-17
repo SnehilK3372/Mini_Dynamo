@@ -171,15 +171,21 @@ PutResult Coordinator::writeQuorum(const string &key, const VersionedValue &vv, 
                 found_standin = true;
                 break;
             }
-            // Store a hint regardless of whether we found a stand-in.
+            // Store the hint whether or not a stand-in was found: it is what lets
+            // the write reach the real owner once it comes back.
             if (hint_store_) {
                 hint_store_->store(owner.node_id, key, vv);
+                metrics_->incHintStored();
             }
-            if (!found_standin) {
-                // No stand-in available — write locally as hint holder.
-                storage_->put(key, serialized);
-                ++localAcks;
-            }
+            // Deliberately no local write / no extra ack when there is no stand-in.
+            // Doing that (as this used to) double-counted THIS node: if self is
+            // already an owner it had stored the value and acked on the branch
+            // above, so acking again let one physical copy satisfy two acks —
+            // W=3 could "succeed" against only two real replicas. An ack must mean
+            // a distinct replica holds the value. With no stand-in there is simply
+            // one fewer replica, and W fails if that leaves it unmet — which is
+            // the honest answer.
+            (void)found_standin;
         } else {
             remotes.push_back(owner);
         }

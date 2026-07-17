@@ -25,6 +25,10 @@ set(TEST_SOURCES
     thread_pool_test.cpp
     connection_pool_test.cpp
     hash_test.cpp
+    # Randomised properties over the correctness core, and multi-node behaviour
+    # against real Coordinators/gossip/handoff wired in-process (support/).
+    vector_clock_property_test.cpp
+    cluster_test.cpp
 )
 
 # The RocksDB engine test only makes sense when the durable engine is compiled.

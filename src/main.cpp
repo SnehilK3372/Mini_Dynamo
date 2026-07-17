@@ -179,13 +179,18 @@ int main() {
     int hint_ttl = stoi(getenv_str("HINT_TTL_SECONDS", "10800"));
     HintStore hint_store{chrono::seconds(hint_ttl)};
 
-    // deliver_fn: replicate a hinted value to the recovered node.
-    auto deliver_fn = [&send_fn](const NodeInfo &target, const string &key,
-                                 const VersionedValue &value) -> bool {
+    // deliver_fn: replicate a hinted value to the recovered node. Counting the
+    // delivery here (rather than inside HandoffThread) keeps the thread free of a
+    // Metrics dependency while still moving the counter that was previously never
+    // incremented by anything.
+    auto deliver_fn = [&send_fn, metrics_ptr](const NodeInfo &target, const string &key,
+                                              const VersionedValue &value) -> bool {
         string payload = "REPLICATE|" + key + "|" + base64::encode(value.data) + "|hint|" +
                          value.clock.serialize();
         string resp = send_fn(target.host, target.port, payload);
-        return resp.find("RESPONSE|OK") != string::npos;
+        bool ok = resp.find("RESPONSE|OK") != string::npos;
+        if (ok) metrics_ptr->incHintDelivered();
+        return ok;
     };
 
     HandoffThread handoff(&hint_store, deliver_fn);

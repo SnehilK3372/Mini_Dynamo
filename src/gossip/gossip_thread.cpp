@@ -41,15 +41,29 @@ GossipThread::GossipThread(const NodeInfo &self, Router *router, SendFn send_fn,
       send_fn_(std::move(send_fn)),
       config_(config),
       swim_(self, config.suspicion_mult) {
-    // When a node joins or recovers, add it to the ring.
-    // When a node dies, remove it from the ring.
+    // A node that joins or recovers enters the ring.
+    //
+    // A node that DIES stays in the ring, deliberately. The ring is the key's
+    // preference list; gossip-detected death is a *temporary* failure, and Dynamo
+    // separates that from permanent departure:
+    //   - temporary  -> ring unchanged; the coordinator skips the dead owner on
+    //                   reads and stores a hint + uses a stand-in on writes.
+    //   - permanent  -> an explicit administrative removal changes the ring.
+    // Evicting on a gossip timeout conflated the two, and cost twice over:
+    //   1. every transient blip reshuffled key ownership across the ring, and
+    //   2. it made hinted handoff DEAD CODE. A node is isAlive while Alive *or*
+    //      Suspect, and the instant it turned Dead it left the ring — so it was
+    //      never an owner the coordinator could see as dead, and
+    //      hint_store_->store() was unreachable. Tier 4.2's headline feature had
+    //      never stored a single hint. Found by tests/cluster_test.cpp.
+    // Liveness now lives where it belongs: in Swim, consulted per request via the
+    // coordinator's is_alive_fn.
     swim_.onMemberChange([this](const NodeInfo &info, MemberState state) {
         if (state == MemberState::Alive) {
             router_->addPhysicalNode(info);
             jlog::op("info", "gossip", info.node_id, "added_to_ring");
         } else if (state == MemberState::Dead) {
-            router_->removePhysicalNode(info.node_id);
-            jlog::op("info", "gossip", info.node_id, "removed_from_ring");
+            jlog::op("info", "gossip", info.node_id, "marked_dead_kept_in_ring");
         }
     });
 }
@@ -212,16 +226,25 @@ std::string GossipThread::handleMessage(const std::string &payload) {
         }
         applyIncomingEvents(field(f, 5));
 
-        // Apply the join as a membership event.
+        // The joiner is speaking for itself, so this is authoritative — unlike the
+        // relayed events above, it is not gated on incarnation (a restarted process
+        // returns at 0 and would otherwise be rejected forever).
         MemberEvent join_ev;
         join_ev.type = EventType::Join;
         join_ev.node_id = sender_id;
         join_ev.host = host;
         join_ev.port = port;
         join_ev.incarnation = incarnation;
-        if (swim_.applyEvent(join_ev)) {
-            swim_.enqueueEvent(join_ev);
-        }
+        uint64_t eff = swim_.applyDirectJoin(join_ev);
+
+        // Disseminate the revival as Alive at the *effective* incarnation, which
+        // applyDirectJoin bumped past whatever we held. Re-broadcasting the join's
+        // own (possibly stale, e.g. 0) incarnation would be rejected by every peer
+        // still holding the node Dead — it would rejoin for us and nobody else.
+        MemberEvent alive_ev = join_ev;
+        alive_ev.type = EventType::Alive;
+        alive_ev.incarnation = eff;
+        swim_.enqueueEvent(alive_ev);
 
         // Reply with an ACK that carries our full membership as events so the
         // joiner learns about all existing nodes immediately.

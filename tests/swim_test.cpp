@@ -187,7 +187,8 @@ TEST_F(SwimTest, RestartedNodeRejoinsAtSameIncarnation) {
     swim.confirmDead("node2");
     ASSERT_FALSE(swim.isAlive("node2"));
 
-    // The node restarts: same id, same address, incarnation back to 0.
+    // The node restarts: same id, same address, incarnation back to 0, and speaks
+    // for itself through the join handshake.
     MemberEvent rejoin;
     rejoin.type = EventType::Join;
     rejoin.node_id = "node2";
@@ -195,7 +196,58 @@ TEST_F(SwimTest, RestartedNodeRejoinsAtSameIncarnation) {
     rejoin.port = 5002;
     rejoin.incarnation = 0;  // NOT higher — a fresh process
 
-    EXPECT_TRUE(swim.applyEvent(rejoin)) << "a restarted node must be able to rejoin";
+    uint64_t eff = swim.applyDirectJoin(rejoin);
+    EXPECT_TRUE(swim.isAlive("node2")) << "a restarted node must be able to rejoin";
+    // The reviver must bump past its own stale Dead record, or peers still holding
+    // Dead@0 would reject the relayed Alive@0 and the node would rejoin for this
+    // node only — invisible to the rest of the cluster.
+    EXPECT_GT(eff, 0u) << "the effective incarnation must beat the stale Dead record";
+}
+
+// The flip side: relayed gossip is NOT authoritative. A Join event forwarded by a
+// third party must obey the incarnation rules, or a stale Join circulating in the
+// dissemination stream would resurrect a genuinely dead node.
+TEST_F(SwimTest, RelayedJoinCannotReviveDead) {
+    MemberEvent join;
+    join.type = EventType::Join;
+    join.node_id = "node2";
+    join.host = "host2";
+    join.port = 5002;
+    join.incarnation = 0;
+    swim.applyEvent(join);
+    swim.confirmDead("node2");
+
+    EXPECT_FALSE(swim.applyEvent(join)) << "a relayed Join must not resurrect a dead node";
+    EXPECT_FALSE(swim.isAlive("node2"));
+}
+
+// A suspected node must not be cleared by a same-incarnation relay. Only the node
+// itself may refute, by bumping its incarnation. Accepting `>=` here let a stale
+// event clear suspicion — and since gossip re-enqueues anything that changed
+// state, that event circulated forever and the node could never be declared Dead.
+TEST_F(SwimTest, SameIncarnationRelayCannotClearSuspicion) {
+    MemberEvent join;
+    join.type = EventType::Join;
+    join.node_id = "node2";
+    join.host = "host2";
+    join.port = 5002;
+    join.incarnation = 0;
+    swim.applyEvent(join);
+    swim.suspect("node2");
+
+    MemberEvent relayed_alive;
+    relayed_alive.type = EventType::Alive;
+    relayed_alive.node_id = "node2";
+    relayed_alive.host = "host2";
+    relayed_alive.port = 5002;
+    relayed_alive.incarnation = 0;  // same incarnation the suspicion was raised at
+
+    EXPECT_FALSE(swim.applyEvent(relayed_alive))
+        << "same-incarnation relay must not clear suspicion (it never dies out)";
+
+    // A genuine refutation — strictly newer — still wins.
+    relayed_alive.incarnation = 1;
+    EXPECT_TRUE(swim.applyEvent(relayed_alive));
     EXPECT_TRUE(swim.isAlive("node2"));
 }
 
@@ -222,7 +274,15 @@ TEST_F(SwimTest, StaleAliveGossipStillCannotReviveDead) {
     EXPECT_FALSE(swim.isAlive("node2"));
 }
 
-TEST_F(SwimTest, FreshJoinRevivesDead) {
+// Relayed gossip carrying a strictly NEWER incarnation does revive a dead node —
+// that is how a rejoin propagates to third parties, once the reviver has bumped
+// past its stale record (see applyDirectJoin).
+//
+// Note this test alone is not evidence that restarts work: it hands over an
+// artificially higher incarnation (5), whereas a real restarted process comes back
+// at 0. That gap is exactly how the rejoin bug survived a green suite — see
+// RestartedNodeRejoinsAtSameIncarnation above, and Cluster.RestartedNodeRejoins.
+TEST_F(SwimTest, NewerIncarnationGossipRevivesDead) {
     MemberEvent join;
     join.type = EventType::Join;
     join.node_id = "node2";
@@ -233,13 +293,12 @@ TEST_F(SwimTest, FreshJoinRevivesDead) {
 
     swim.confirmDead("node2");
 
-    // A new Join with higher incarnation revives the node.
     MemberEvent rejoin;
-    rejoin.type = EventType::Join;
+    rejoin.type = EventType::Alive;
     rejoin.node_id = "node2";
     rejoin.host = "host2";
     rejoin.port = 5002;
-    rejoin.incarnation = 5;
+    rejoin.incarnation = 5;  // strictly newer than the Dead record
 
     EXPECT_TRUE(swim.applyEvent(rejoin));
     EXPECT_TRUE(swim.isAlive("node2"));
