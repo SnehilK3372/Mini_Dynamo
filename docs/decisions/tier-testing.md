@@ -58,9 +58,9 @@ consults `is_alive_fn` per request (skip on reads — already there from 4.3 —
 administrative ring change) — and cost twice: every transient blip reshuffled key ownership, and hinted
 handoff became dead code. `TemporaryFailureDoesNotReshuffleOwnership` now pins the property.
 
-*Consequence to accept:* a permanently-dead node keeps its ring slots forever, so its keys run on
-stand-ins whose hints expire after the TTL. Permanent removal needs an administrative path (`Leave`
-exists in the enum but nothing emits it) — recorded in `docs/scalability-constraints.md`.
+*Consequence that had to be accepted here:* a permanently-dead node keeps its ring slots forever, so its
+keys run on stand-ins whose hints expire after the TTL. Permanent removal needed an administrative path,
+which **Tier 4.6 added** (the `LEAVE` verb + `MemberState::Left` tombstone; `docs/decisions/tier-4.6.md`).
 
 ### A direct join is authoritative; relayed gossip is not
 **Chose:** split `applyDirectJoin()` (the SWIM_JOIN handshake — the node speaking for itself, accepted

@@ -42,6 +42,17 @@ class GossipThread {
     // Contact seed nodes to announce this node's presence. Called once at startup.
     void joinViaSeeds(const std::vector<std::string> &seeds);
 
+    // Permanently remove `node_id` from the cluster (the LEAVE verb). Drops it
+    // from the ring, tombstones it, and gossips the departure to every peer.
+    //
+    // Deliberately actionable from ANY node, about any node — including one that
+    // is already unreachable. The target never has to participate, which it could
+    // not do anyway in the case this mainly exists for: reclaiming the ring slots
+    // of a node that is permanently gone.
+    //
+    // Returns false if `node_id` is unknown to this node's membership view.
+    bool requestLeave(const std::string &node_id);
+
     // Access the SWIM state (e.g., to register callbacks).
     Swim &swim() { return swim_; }
 

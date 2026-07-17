@@ -34,6 +34,15 @@ class HintStore {
     // Retrieve and remove all hints for a given target (called on recovery).
     std::vector<Hint> drain(const std::string &target_node_id);
 
+    // Discard all hints for a target, undelivered (called when a node is
+    // permanently removed). Unlike drain(), the hints are simply dropped: a
+    // departed node is never coming back, so the Dead->Alive transition that
+    // delivers hints can never fire, and without this they would occupy memory
+    // until the 3h TTL swept them.
+    //
+    // Returns how many were discarded.
+    size_t dropTarget(const std::string &target_node_id);
+
     // Remove expired hints (called periodically).
     void expireOld();
 

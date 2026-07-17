@@ -116,6 +116,156 @@ TEST(Cluster, RestartedNodeRejoins) {
     EXPECT_TRUE(c.waitForRingEverywhere(3));
 }
 
+// ---- Permanent removal (Tier 4.6) ---------------------------------------
+
+// The other half of Dynamo's distinction. Gossip can only ever conclude
+// "unreachable", which is why DeadNodeIsDetectedButStaysInTheRing holds; deciding
+// a node is gone FOR GOOD is an operator's call, and it is the one thing that may
+// change the ring.
+TEST(Cluster, PermanentRemovalEvictsFromEveryRing) {
+    InProcessCluster c(4);
+    c.startGossip();
+    ASSERT_TRUE(c.waitForRingEverywhere(4));
+
+    // The node is already gone — the case this exists for. Its slots would
+    // otherwise be held forever by a corpse.
+    c.kill("node3");
+    ASSERT_TRUE(c.waitForAliveEverywhere("node3", false));
+    ASSERT_TRUE(c.waitForRingContains("node3", true)) << "precondition: death alone keeps the ring";
+
+    ASSERT_TRUE(c.decommission("node3"));
+
+    // One node was told; gossip must carry it to everyone.
+    EXPECT_TRUE(c.waitForLeftEverywhere("node3"))
+        << "the departure never propagated beyond the node that was told";
+    EXPECT_TRUE(c.waitForRingContains("node3", /*present=*/false))
+        << "a permanently removed node must lose its ring slots";
+    EXPECT_TRUE(c.waitForRingEverywhere(3));
+}
+
+// THE REGRESSION THIS TIER EXISTS TO PREVENT, and the deliberate mirror of
+// Cluster.RestartedNodeRejoins. Same actions, opposite requirement — the pair is
+// the point. A restarted node MUST come back; a decommissioned one MUST NOT, even
+// though both return at incarnation 0 through the same authoritative handshake that
+// is (by design) not gated on incarnation.
+TEST(Cluster, DecommissionedNodeCannotRejoin) {
+    InProcessCluster c(3);
+    c.startGossip();
+    ASSERT_TRUE(c.waitForRingEverywhere(3));
+
+    ASSERT_TRUE(c.decommission("node2"));
+    ASSERT_TRUE(c.waitForLeftEverywhere("node2"));
+    ASSERT_TRUE(c.waitForRingContains("node2", false));
+
+    // The retired node's process comes back — a fresh Swim at incarnation 0, and it
+    // announces itself through the seed exactly as a legitimate restart would. The
+    // cluster must not take it back.
+    c.restart("node2");
+
+    // Give gossip real time to get it wrong: several protocol periods, so a leak
+    // would actually surface rather than being outrun by the assertion.
+    EXPECT_FALSE(
+        c.waitFor([&] { return InProcessCluster::ringHas(c.node("node1"), "node2"); }, 500ms))
+        << "a decommissioned node walked back into the ring on restart — the operator's "
+           "decision silently evaporated the moment the box rebooted";
+    EXPECT_FALSE(
+        c.waitFor([&] { return InProcessCluster::ringHas(c.node("node3"), "node2"); }, 200ms))
+        << "the departed node got back into a peer's ring";
+    EXPECT_EQ(c.node("node1").gossipRef()->swim().stateOf("node2"), gossip::MemberState::Left);
+}
+
+// The refused joiner must be TOLD, not stonewalled: the ack carries a Leave naming
+// it, which trips its own self-Leave branch. Otherwise it spins forever believing
+// it is a cluster member, serving reads from a ring nobody else agrees with.
+TEST(Cluster, ARefusedJoinerRetiresItself) {
+    InProcessCluster c(3);
+    c.startGossip();
+    ASSERT_TRUE(c.waitForRingEverywhere(3));
+
+    ASSERT_TRUE(c.decommission("node2"));
+    ASSERT_TRUE(c.waitForLeftEverywhere("node2"));
+
+    c.restart("node2");  // joins via the seed, which refuses it
+
+    NodeCtx &n2 = c.node("node2");
+    EXPECT_TRUE(c.waitFor(
+        [&] {
+            auto g = n2.gossipRef();
+            return g && g->swim().hasLeft();
+        },
+        2s))
+        << "the refused joiner never learned it had been retired";
+
+    EXPECT_FALSE(InProcessCluster::ringHas(n2, "node2"))
+        << "a retired node must drop itself from its own ring, or it keeps serving keys "
+           "it no longer owns";
+}
+
+// The exact mirror of TemporaryFailureDoesNotReshuffleOwnership: same setup, same
+// 50 keys, opposite assertion. Together the two pin the temporary-vs-permanent
+// distinction as an executable property rather than a paragraph in a doc.
+TEST(Cluster, PermanentRemovalReshufflesOwnership) {
+    InProcessCluster c(4);
+    c.startGossip();
+    ASSERT_TRUE(c.waitForRingEverywhere(4));
+
+    NodeCtx &n1 = c.node("node1");
+    auto ownersOf = [&](int i) {
+        std::vector<std::string> owners;
+        for (const auto &o : n1.router.findOwners("key" + std::to_string(i), 3)) {
+            owners.push_back(o.node_id);
+        }
+        return owners;
+    };
+
+    std::vector<std::vector<std::string>> before;
+    for (int i = 0; i < 50; ++i) before.push_back(ownersOf(i));
+
+    ASSERT_TRUE(c.decommission("node3"));
+    ASSERT_TRUE(c.waitForRingContains("node3", false));
+
+    int moved = 0;
+    for (int i = 0; i < 50; ++i) {
+        auto now = ownersOf(i);
+        for (const auto &o : now) {
+            ASSERT_NE(o, "node3") << "a departed node must not own key" << i << " any more";
+        }
+        if (now != before[i]) ++moved;
+    }
+    EXPECT_GT(moved, 0) << "removal must hand the departed node's ranges to someone — if "
+                           "nothing moved, the ring never changed and its keys are lost";
+}
+
+// Hints for a departed node can never be delivered: handoff fires on Dead->Alive,
+// and Left is terminal. Without an explicit drop they would sit in memory until the
+// 3h TTL swept them.
+TEST(Cluster, LeaveDropsPendingHints) {
+    InProcessCluster c(3);
+    c.startGossip();
+    ASSERT_TRUE(c.waitForRingEverywhere(3));
+
+    NodeCtx &n1 = c.node("node1");
+    std::string key;
+    for (int i = 0; i < 5000 && key.empty(); ++i) {
+        std::string k = "dk" + std::to_string(i);
+        if (ownsKey(n1, k, "node2") && ownsKey(n1, k, "node1")) key = k;
+    }
+    ASSERT_FALSE(key.empty());
+
+    c.kill("node2");
+    ASSERT_TRUE(c.waitForAliveEverywhere("node2", false));
+    ASSERT_TRUE(n1.coord->coordinatePut(key, "v", VectorClock{}, 3, 2).ok);
+    ASSERT_TRUE(c.waitFor([&] { return n1.hints.hintCountFor("node2") > 0; }, 2s))
+        << "precondition: a hint must exist to be dropped";
+
+    // main.cpp wires this to the Left callback; the harness asserts the store's own
+    // contract, which is the part that could silently rot.
+    ASSERT_TRUE(c.decommission("node2"));
+    EXPECT_GT(n1.hints.dropTarget("node2"), 0u);
+    EXPECT_EQ(n1.hints.hintCountFor("node2"), 0u)
+        << "hints for a node that can never recover must not linger for the full TTL";
+}
+
 // ---- Hinted handoff (Tier 4.2) ------------------------------------------
 
 // HandoffThread's first test. The feature was silently inert for weeks: hints
