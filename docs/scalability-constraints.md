@@ -108,8 +108,31 @@ changes require a fresh ring anyway) but means the cluster is not durable across
 
 ## 3. Fixed during this audit
 
-Two hot-path costs that grew *with cluster size* — both would have suppressed the very linear-scaling
-curve the 4.5 benchmark is meant to demonstrate:
+### 3.0 A restarted node could never rejoin — **the most serious bug found**
+A node that restarts begins again at **incarnation 0**, while the cluster still holds it `Dead` at
+incarnation ≥ 0. SWIM's revive rule demanded a *strictly higher* incarnation, so `0 <= 0` → the join
+was rejected and the node stayed `Dead` **forever**: alive, healthy, and receiving zero traffic.
+
+Observed live — after a kill/restart the ring reported only `node1` + `node3`, and node2's own log
+showed the tell-tale asymmetry: it had happily added node1 and node3 to *its* ring, while they had
+permanently written it off.
+
+**Why it mattered more than lost capacity:** hinted handoff fires on the `Dead → Alive` transition. A
+node that can never transition back means **hints are stored and never delivered** — they just expire
+after the 3 h TTL. Tier 4.2's headline recovery feature was silently inert in exactly the scenario it
+exists for.
+
+**Fix:** a `Join` is the node speaking for *itself* through the join handshake — authoritative proof of
+liveness, accepted regardless of incarnation. The incarnation guard still applies to relayed `Alive`
+gossip, which is where stale-resurrection actually matters (`StaleAliveGossipStillCannotReviveDead`
+covers that). Verified end-to-end: kill → evict → restart → **rejoin**.
+
+**Why no test caught it:** `FreshJoinRevivesDead` used an artificially higher incarnation (5) — it
+encoded the bug's assumption instead of a real restart. `RestartedNodeRejoinsAtSameIncarnation` now
+pins the real scenario. A reminder that a passing suite only proves what it actually models.
+
+### Hot paths that grew with cluster size
+Both would have suppressed the very linear-scaling curve the 4.5 benchmark is meant to demonstrate:
 
 1. **`RingRouter.ownersFor` recomputed the distinct-physical count on every request**, iterating all
    `vnodes × N` ring entries — 12,800 at 100 nodes, 128,000 at 1000, **per gateway request**. Now

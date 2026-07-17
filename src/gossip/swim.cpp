@@ -57,8 +57,29 @@ bool Swim::applyEvent(const MemberEvent &event) {
                 fireCallbacks(entry.info, MemberState::Alive);
                 return true;
             }
-            // Dead nodes can only be revived by a strictly higher incarnation
-            // (proof that they restarted and re-announced themselves).
+            // A Join is the node speaking for ITSELF through the join handshake —
+            // authoritative proof it is up, whatever we remember about it. Accept it
+            // unconditionally, adopting its fresh incarnation and address.
+            //
+            // This must not be gated on incarnation: a restarted process starts again
+            // at incarnation 0, while we still hold it Dead at >= 0, so a
+            // "strictly higher" rule strands a healthy node as Dead *forever* — it
+            // gets no traffic, and (because hinted handoff fires on Dead -> Alive) its
+            // hints are never delivered and silently expire. The incarnation guard
+            // exists to stop STALE THIRD-PARTY GOSSIP (relayed Alive events) from
+            // resurrecting a node that really is gone; a direct join is not that.
+            if (event.type == EventType::Join && it->second.state == MemberState::Dead) {
+                it->second.state = MemberState::Alive;
+                it->second.incarnation = event.incarnation;
+                if (!event.host.empty()) {
+                    it->second.info.host = event.host;
+                    it->second.info.port = event.port;
+                }
+                fireCallbacks(it->second.info, MemberState::Alive);
+                return true;
+            }
+            // Relayed liveness (Alive), or a Join for a node we already track as
+            // live: only a strictly newer incarnation may override what we hold.
             if (it->second.state == MemberState::Dead) {
                 if (event.incarnation <= it->second.incarnation) return false;
             } else if (it->second.state == MemberState::Alive) {
