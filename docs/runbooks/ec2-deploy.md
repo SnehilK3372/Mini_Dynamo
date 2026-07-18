@@ -198,6 +198,43 @@ watch -n2 'for p in 9101 9102 9103; do curl -s localhost:$p/metrics \
   | grep -E "minidynamo_hints_(stored|delivered)_total"; done'
 ```
 
+## 7b. Decommission a node (permanent removal, Tier 4.6/4.7)
+
+Two different departures, two different responses — do not confuse them:
+
+- **Node crashed / rebooting / briefly unreachable → do nothing.** Gossip marks it dead, the
+  coordinators skip it on reads and hint for it on writes, and it re-joins on its own when it
+  returns. The ring deliberately does not change.
+- **Node is gone for good** (instance terminated, scale-down, replaced) → **decommission it**, or its
+  ring slots are served by stand-ins forever and its keys sit under-replicated after the 3h hint TTL.
+
+```bash
+# From the box (or anywhere that can reach a node port). Target ANY LIVE node —
+# never the node being removed (it's usually already gone):
+scripts/leave.sh localhost:9001 node3          # tell node1 to retire node3
+# → RESPONSE|OK|left
+
+# Verify: the ring shrinks on EVERY node (gossip + Tier-4.7 anti-entropy carry
+# the tombstone; a node that was partitioned during the LEAVE catches up via
+# digest sync within seconds of healing):
+watch 'curl -s localhost:9090/api/v1/query?query=minidynamo_ring_physical_nodes | jq ".data.result[] | [.metric.node_id, .value[1]]"'
+# healthy end-state: every node reports the same, reduced count (min == max)
+```
+
+**Rules that will bite you if ignored:**
+
+1. **Never LEAVE the live seed** while it is still running — new joiners bootstrap through it and
+   would learn a ring that still contains it, splitting the view. Retire a seed only when it is
+   actually down, or after repointing `SEED_NODES` everywhere.
+2. **A retired id can never rejoin.** The tombstone is deliberately permanent (it is the only thing
+   stopping the decommissioned node from walking back in on reboot). A replacement machine must get a
+   **fresh `NODE_ID`**.
+3. **Ownership moves; data does not follow.** New owners fill in via read repair as keys are read —
+   until the Merkle anti-entropy exchange is implemented, unread keys stay under-replicated
+   (`docs/scalability-constraints.md` §2.0/§2.1).
+4. **Swarm scale-down:** shrinking `kvstore` replicas kills tasks but leaves them Dead-in-ring.
+   After scaling down, run `leave.sh` once per removed slot (`kvstore-<N>`), highest slots first.
+
 ## 8. Prometheus (SSH tunnel)
 
 ```bash
@@ -229,6 +266,15 @@ sum(rate(minidynamo_pool_connections_created_total[1m]))
 
 # Ring-aware routing (4.4): coordination spread, not funnelled onto one node
 sum(rate(minidynamo_requests_total[1m])) by (node_id)
+
+# Ring divergence (4.7) — THE membership health check. Healthy: this is 0
+# (every node sees the same ring). Nonzero for more than ~30s: a node's ring has
+# diverged; check its logs for membership_sync entries.
+max(minidynamo_ring_physical_nodes) - min(minidynamo_ring_physical_nodes)
+
+# Membership anti-entropy (4.7): syncs fire on divergence and then stop.
+# A steadily climbing rate here means chronic digest mismatch — investigate.
+sum(rate(minidynamo_membership_syncs_total[5m])) by (node_id)
 ```
 
 > **Targets:** the gateway job now uses Docker DNS discovery (`dns_sd_configs`)

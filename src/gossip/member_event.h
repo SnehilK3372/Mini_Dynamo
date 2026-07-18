@@ -18,7 +18,10 @@ enum class EventType : char {
 };
 
 struct MemberEvent {
-    EventType type;
+    // Default-initialized: deserialize() returns a partially-filled event on
+    // malformed input (empty node_id, which callers drop), and an indeterminate
+    // enum read there would be UB.
+    EventType type = EventType::Alive;
     std::string node_id;
     std::string host;
     uint16_t port = 0;

@@ -69,6 +69,17 @@ struct NodeCtx {
     // dead peer looks from the outside.
     std::atomic<bool> down{false};
 
+    // "Partitioned": the transport refuses everything to/from this node — but
+    // unlike `down`, the node's gossip thread keeps running and KEEPS ITS STATE.
+    // That distinction is what makes "missed a gossip event" reproducible: a
+    // killed+restarted node gets a clean view from the join ack and hides the
+    // bug, while a partitioned node re-emerges holding whatever it held.
+    std::atomic<bool> partitioned{false};
+
+    // Completed membership sync exchanges this node took part in (either side) —
+    // the harness's stand-in for the membership_syncs_total metric.
+    std::atomic<uint64_t> membership_syncs{0};
+
     // The gossip thread is held by shared_ptr and guarded, because restart()
     // replaces it while *other* nodes' gossip threads may be calling into it.
     // Callers take a shared_ptr copy under the lock and then release the lock
@@ -172,7 +183,7 @@ class InProcessCluster {
         return waitFor(
             [&] {
                 for (auto &n : nodes_) {
-                    if (n->down.load() || n->info.node_id == id) continue;
+                    if (unreachable(*n) || n->info.node_id == id) continue;
                     auto g = n->gossipRef();
                     if (!g) return false;
                     if (g->swim().stateOf(id) != gossip::MemberState::Left) return false;
@@ -181,6 +192,11 @@ class InProcessCluster {
             },
             timeout);
     }
+
+    // Cut a node off from all traffic without stopping it — a network partition,
+    // not a crash. See NodeCtx::partitioned for why these are different things.
+    void partition(const std::string &id) { node(id).partitioned = true; }
+    void heal(const std::string &id) { node(id).partitioned = false; }
 
     // Simulate a process restart: a BRAND NEW GossipThread/Swim, so the node comes
     // back at *incarnation 0* — exactly what a fresh process does. This is the
@@ -209,12 +225,17 @@ class InProcessCluster {
         return pred();
     }
 
-    // Every live node's ring holds exactly `expected` physical nodes.
+    // A node that is down or partitioned is exempt from convergence checks: it
+    // cannot receive the traffic that would converge it. Once healed it is
+    // included again — which is exactly what the partition tests assert on.
+    static bool unreachable(const NodeCtx &n) { return n.down.load() || n.partitioned.load(); }
+
+    // Every reachable node's ring holds exactly `expected` physical nodes.
     bool waitForRingEverywhere(size_t expected, std::chrono::milliseconds timeout = 5s) {
         return waitFor(
             [&] {
                 for (auto &n : nodes_) {
-                    if (n->down.load()) continue;
+                    if (unreachable(*n)) continue;
                     if (n->router.getAllPhysicalNodes().size() != expected) return false;
                 }
                 return true;
@@ -222,13 +243,13 @@ class InProcessCluster {
             timeout);
     }
 
-    // Every live node's ring contains (or does not contain) `id`.
+    // Every reachable node's ring contains (or does not contain) `id`.
     bool waitForRingContains(const std::string &id, bool present,
                              std::chrono::milliseconds timeout = 5s) {
         return waitFor(
             [&] {
                 for (auto &n : nodes_) {
-                    if (n->down.load() || n->info.node_id == id) continue;
+                    if (unreachable(*n) || n->info.node_id == id) continue;
                     if (ringHas(*n, id) != present) return false;
                 }
                 return true;
@@ -248,7 +269,7 @@ class InProcessCluster {
         return waitFor(
             [&] {
                 for (auto &n : nodes_) {
-                    if (n->down.load() || n->info.node_id == id) continue;
+                    if (unreachable(*n) || n->info.node_id == id) continue;
                     auto g = n->gossipRef();
                     if (!g || g->swim().isAlive(id) != alive) return false;
                 }
@@ -294,25 +315,34 @@ class InProcessCluster {
 
     std::shared_ptr<gossip::GossipThread> makeGossip(NodeCtx &n) {
         // The SendFn is the whole network: find the peer and call it directly. A
-        // down peer returns "" — indistinguishable from a timeout/refusal to the
-        // gossip protocol, which is the point.
-        auto send = [this](const std::string &host, uint16_t port,
-                           const std::string &payload) -> std::string {
+        // down or partitioned endpoint returns "" — indistinguishable from a
+        // timeout/refusal to the gossip protocol, which is the point. Partition is
+        // checked on BOTH ends: a partitioned node can neither reach out nor be
+        // reached.
+        NodeCtx *self_ctx = &n;
+        auto send = [this, self_ctx](const std::string &host, uint16_t port,
+                                     const std::string &payload) -> std::string {
+            if (self_ctx->partitioned.load()) return "";
             NodeCtx *t = find(host, port);
-            if (!t || t->down.load()) return "";
+            if (!t || t->down.load() || t->partitioned.load()) return "";
             auto g = t->gossipRef();  // copy under lock, call without it
             if (!g) return "";
             return g->handleMessage(payload);
         };
 
         auto g = std::make_shared<gossip::GossipThread>(n.info, &n.router, send, fastGossip());
-        // Same wiring main.cpp does: a recovered peer wakes hint delivery.
+        // Same wiring main.cpp does: a recovered peer wakes hint delivery; every
+        // membership change refreshes the ring gauge (after GossipThread's own
+        // ring callback, so the count is post-mutation); a completed sync bumps
+        // the counter the partition tests assert on.
         NodeCtx *ctx = &n;
         g->swim().onMemberChange([ctx](const NodeInfo &info, gossip::MemberState st) {
             if (st == gossip::MemberState::Alive && ctx->handoff) {
                 ctx->handoff->notifyRecovery(info);
             }
+            ctx->metrics.setRingNodes(ctx->router.physicalCount());
         });
+        g->setOnMembershipSync([ctx] { ctx->membership_syncs.fetch_add(1); });
         return g;
     }
 
@@ -332,10 +362,12 @@ class InProcessCluster {
 
         // Deliver a hint straight into the recovered peer's storage, via the same
         // replicate rule the wire path uses.
-        auto deliver = [this](const NodeInfo &target, const std::string &key,
-                              const VersionedValue &value) -> bool {
+        NodeCtx *self_ctx = &n;
+        auto deliver = [this, self_ctx](const NodeInfo &target, const std::string &key,
+                                        const VersionedValue &value) -> bool {
+            if (self_ctx->partitioned.load()) return false;
             NodeCtx *t = find(target.host, target.port);
-            if (!t || t->down.load()) return false;
+            if (!t || t->down.load() || t->partitioned.load()) return false;
             replica_ops::applyReplicate(t->storage, key, value);
             return true;
         };
@@ -355,8 +387,10 @@ inline ReplicaWriteResult InProcessReplicaClient::writeReplica(const NodeInfo &p
                                                                const std::string &key,
                                                                const VersionedValue &value,
                                                                std::chrono::milliseconds) {
+    if (cluster_->node(self_).partitioned.load()) return {false};
     NodeCtx *t = cluster_->find(peer.host, peer.port);
-    if (!t || t->down.load()) return {false};  // unreachable → no ack, like a dead peer
+    if (!t || t->down.load() || t->partitioned.load())
+        return {false};  // unreachable → no ack, like a dead peer
     replica_ops::applyReplicate(t->storage, key, value);
     return {true};
 }
@@ -364,8 +398,9 @@ inline ReplicaWriteResult InProcessReplicaClient::writeReplica(const NodeInfo &p
 inline ReplicaReadResult InProcessReplicaClient::readReplica(const NodeInfo &peer,
                                                              const std::string &key,
                                                              std::chrono::milliseconds) {
+    if (cluster_->node(self_).partitioned.load()) return {false, false, {}};
     NodeCtx *t = cluster_->find(peer.host, peer.port);
-    if (!t || t->down.load()) return {false, false, {}};
+    if (!t || t->down.load() || t->partitioned.load()) return {false, false, {}};
     ReplicaReadResult r;
     r.ok = true;
     auto v = replica_ops::readLocal(t->storage, key);

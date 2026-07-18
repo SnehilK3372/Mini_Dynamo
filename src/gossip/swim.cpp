@@ -3,7 +3,38 @@
 #include <algorithm>
 #include <cmath>
 
+#include "../util.h"
+
 namespace gossip {
+
+namespace {
+
+// One membership entry rendered into hash64. '\x01' separators prevent
+// (id="ab", inc=1) and (id="a", ...) style ambiguities; the state class is one
+// char: 'A' alive-or-suspect, 'D' dead, 'L' left.
+uint64_t entryDigest(const std::string &id, char state_class, uint64_t incarnation) {
+    std::string buf;
+    buf.reserve(id.size() + 12);
+    buf += id;
+    buf += '\x01';
+    buf += state_class;
+    buf += '\x01';
+    for (int i = 0; i < 8; ++i) buf += static_cast<char>((incarnation >> (8 * i)) & 0xff);
+    return hash64(buf);
+}
+
+char stateClass(MemberState s) {
+    switch (s) {
+        case MemberState::Dead:
+            return 'D';
+        case MemberState::Left:
+            return 'L';
+        default:
+            return 'A';  // Alive and Suspect collapse — suspicion is transient
+    }
+}
+
+}  // namespace
 
 Swim::Swim(const NodeInfo &self, int suspicion_mult)
     : self_(self), suspicion_mult_(suspicion_mult), rng_(std::random_device{}()) {}
@@ -117,7 +148,22 @@ bool Swim::applyEvent(const MemberEvent &event) {
         }
 
         case EventType::Dead: {
-            if (it == members_.end()) return false;
+            if (it == members_.end()) {
+                // Record a Dead for a node we never knew, instead of dropping it
+                // (mirror of the unknown-Leave case below). Dropping was harmless
+                // when events were fire-and-forget; with digest-based sync (Tier
+                // 4.7) it made "I hold X:Dead, you never heard of X" an
+                // *unresolvable* digest mismatch — every comparison differs,
+                // every sync replays the same event, nothing converges. No ring
+                // callback: the node was never Alive here, so there is nothing to
+                // add or evict.
+                MemberEntry entry;
+                entry.info = {event.node_id, event.host, event.port};
+                entry.state = MemberState::Dead;
+                entry.incarnation = event.incarnation;
+                members_[event.node_id] = entry;
+                return true;
+            }
             if (it->second.state == MemberState::Dead) return false;
             if (it->second.state == MemberState::Left) return false;  // terminal
             if (event.incarnation < it->second.incarnation) return false;
@@ -293,6 +339,15 @@ std::vector<NodeInfo> Swim::alivePeers() const {
     return out;
 }
 
+std::vector<NodeInfo> Swim::deadPeers() const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    std::vector<NodeInfo> out;
+    for (const auto &[id, entry] : members_) {
+        if (entry.state == MemberState::Dead) out.push_back(entry.info);
+    }
+    return out;
+}
+
 std::vector<MemberEntry> Swim::allMembers() const {
     std::lock_guard<std::mutex> lk(mtx_);
     std::vector<MemberEntry> out;
@@ -365,6 +420,67 @@ std::optional<MemberState> Swim::stateOf(const std::string &node_id) const {
     auto it = members_.find(node_id);
     if (it == members_.end()) return std::nullopt;
     return it->second.state;
+}
+
+uint64_t Swim::digest() const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    // XOR-combined per-entry hashes: order-independent by construction, so it is
+    // identical across nodes regardless of how each stores or iterates its view.
+    // Self is an entry like any other — that is what makes the stranded-partition
+    // case detectable: MY entry for me says Alive while YOUR entry for me says
+    // Dead, so our digests differ and one of us initiates the sync that fixes it.
+    //
+    // Terminal states (Dead/Left) digest CLASS-ONLY — incarnation zeroed. Two
+    // nodes legitimately hold the same dead member at different incarnations
+    // (suspicions expire at different moments; applying a Leave keeps the local
+    // incarnation), and syncing cannot reconcile the number: both sides would
+    // mismatch forever while exchanging payloads that change nothing. Class
+    // convergence is what matters; the held incarnation still gates revival
+    // locally, and any class *flip* (say a stale Alive reviving one side) makes
+    // the digests differ again, which is exactly when a sync helps.
+    uint64_t h = entryDigest(self_.node_id, self_left_ ? 'L' : 'A', self_left_ ? 0 : incarnation_);
+    for (const auto &[id, entry] : members_) {
+        char cls = stateClass(entry.state);
+        h ^= entryDigest(id, cls, cls == 'A' ? entry.incarnation : 0);
+    }
+    return h;
+}
+
+std::vector<MemberEvent> Swim::fullState() const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    std::vector<MemberEvent> out;
+    out.reserve(members_.size() + 1);
+
+    MemberEvent self_ev;
+    self_ev.type = self_left_ ? EventType::Leave : EventType::Alive;
+    self_ev.node_id = self_.node_id;
+    self_ev.host = self_.host;
+    self_ev.port = self_.port;
+    self_ev.incarnation = incarnation_;
+    out.push_back(self_ev);
+
+    for (const auto &[id, entry] : members_) {
+        MemberEvent ev;
+        switch (entry.state) {
+            case MemberState::Dead:
+                ev.type = EventType::Dead;
+                break;
+            case MemberState::Left:
+                ev.type = EventType::Leave;
+                break;
+            default:
+                // Suspect travels as Alive: suspicion is this node's private
+                // judgement mid-probe, not a fact to replicate.
+                ev.type = EventType::Alive;
+                break;
+        }
+        ev.node_id = id;
+        ev.host = entry.info.host;
+        ev.port = entry.info.port;
+        ev.incarnation = entry.incarnation;
+        out.push_back(ev);
+    }
+    return out;
 }
 
 std::vector<std::string> Swim::expireSuspects(std::chrono::milliseconds suspicion_timeout) {

@@ -90,6 +90,17 @@ PrometheusMetrics::PrometheusMetrics(const std::string &bind_address, const std:
                                    .Name("minidynamo_pool_connections_reused_total")
                                    .Help("Idle peer connections reused from the connection pool")
                                    .Register(*registry_);
+    auto &membership_syncs_family =
+        BuildCounter()
+            .Name("minidynamo_membership_syncs_total")
+            .Help("Full-state membership syncs triggered by a gossip digest mismatch")
+            .Register(*registry_);
+    // The divergence detector: on a converged cluster min==max of this gauge
+    // across all nodes. A node reporting a different value has a different ring.
+    auto &ring_nodes_family = BuildGauge()
+                                  .Name("minidynamo_ring_physical_nodes")
+                                  .Help("Physical nodes currently in this node's ring")
+                                  .Register(*registry_);
 
     hints_stored_ = &hints_stored_family.Add(node);
     hints_delivered_ = &hints_delivered_family.Add(node);
@@ -97,6 +108,8 @@ PrometheusMetrics::PrometheusMetrics(const std::string &bind_address, const std:
     ae_keys_repaired_ = &ae_keys_family.Add(node);
     pool_created_ = &pool_created_family.Add(node);
     pool_reused_ = &pool_reused_family.Add(node);
+    membership_syncs_ = &membership_syncs_family.Add(node);
+    ring_nodes_ = &ring_nodes_family.Add(node);
 
     node_up_ = &up_family.Add(node);
     node_up_->Set(1);
@@ -147,4 +160,13 @@ uint64_t PrometheusMetrics::poolConnectionCreatedCount() const {
 }
 uint64_t PrometheusMetrics::poolConnectionReusedCount() const {
     return static_cast<uint64_t>(pool_reused_->Value());
+}
+
+void PrometheusMetrics::incMembershipSync() { membership_syncs_->Increment(); }
+uint64_t PrometheusMetrics::membershipSyncCount() const {
+    return static_cast<uint64_t>(membership_syncs_->Value());
+}
+void PrometheusMetrics::setRingNodes(uint64_t n) { ring_nodes_->Set(static_cast<double>(n)); }
+uint64_t PrometheusMetrics::ringNodesCount() const {
+    return static_cast<uint64_t>(ring_nodes_->Value());
 }

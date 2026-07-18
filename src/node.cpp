@@ -8,7 +8,6 @@
 
 #include "base64.h"
 #include "log.h"
-#include "message.h"
 #include "net/framing.h"
 #include "net/tcp_client.h"
 #include "net/tcp_replica_client.h"
@@ -66,7 +65,7 @@ void Node::handleRequest(const string &payload, int client_fd) {
     const string &type = f[0];
 
     // Client-facing ops are timed and counted here at the protocol edge (the
-    // internal REPLICATE/READ/JOIN/RING verbs are cluster plumbing, not client
+    // internal REPLICATE/READ/RING verbs are cluster plumbing, not client
     // traffic, so they don't feed the request-rate/latency metrics). A forwarded
     // PUT/DELETE is counted on both the receiving node and the primary — each did
     // handle a request — which is the honest per-node view of load.
@@ -87,14 +86,12 @@ void Node::handleRequest(const string &payload, int client_fd) {
         handleReplicate(f, client_fd);
     } else if (type == "READ") {
         handleReadReplica(f, client_fd);
-    } else if (type == "JOIN") {
-        handleJoin(payload, client_fd);
     } else if (type == "RING") {
         handleRingQuery(client_fd);
     } else if (type == "LEAVE") {
         handleLeave(f, client_fd);
     } else if (type == "SWIM_PING" || type == "SWIM_PING_REQ" || type == "SWIM_ACK" ||
-               type == "SWIM_JOIN") {
+               type == "SWIM_JOIN" || type == "SWIM_SYNC" || type == "SWIM_SYNC_ACK") {
         if (gossip_) {
             string resp = gossip_->handleMessage(payload);
             if (!resp.empty()) reply(client_fd, resp);
@@ -234,32 +231,12 @@ void Node::handleReadReplica(const vector<string> &f, int client_fd) {
     reply(client_fd, "VAL|" + base64::encode(v->data) + "|" + v->clock.serialize());
 }
 
-// JOIN|<id>|<port>|<origin>|<host>|<port>  → reply with the current ring.
-void Node::handleJoin(const string &payload, int client_fd) {
-    Message msg = Message::deserialize(payload);
-    if (msg.key.empty() || msg.host.empty() || msg.port == 0) {
-        jlog::op("warn", "join", msg.key, "malformed");
-        return;
-    }
-    NodeInfo joiner{msg.key, msg.host, static_cast<uint16_t>(msg.port)};
-    jlog::op("info", "join", joiner.node_id, "added");
-
-    // Snapshot the ring *before* adding the joiner, then add it.
-    vector<NodeInfo> current = router_->getAllPhysicalNodes();
-    router_->addPhysicalNode(joiner);
-
-    ostringstream oss;
-    oss << "RING_UPDATE\n" << current.size() << "\n";
-    for (const auto &n : current) {
-        oss << n.node_id << "|" << n.host << "|" << n.port << "\n";
-    }
-    reply(client_fd, oss.str());
-}
-
-// RING|<origin>  → read-only snapshot of the physical ring. Unlike JOIN (which
-// returns the ring *and* adds the caller), this mutates nothing — it's what the
-// gateway calls to render the live ring without disturbing membership. A distinct
-// header ("RING", not "RING_UPDATE") keeps the two responses unambiguous.
+// RING|<origin>  → read-only snapshot of the physical ring. Mutates nothing —
+// it's what the gateway calls to render the live ring without disturbing
+// membership. All membership changes go through gossip (SWIM_JOIN / LEAVE); the
+// old legacy JOIN verb, which added any caller straight to the router with no
+// Swim, incarnation, or Left-tombstone check, was removed in Tier 4.7 — it had no
+// remaining sender and was a single-frame ring-poisoning hole.
 void Node::handleRingQuery(int client_fd) {
     vector<NodeInfo> nodes = router_->getAllPhysicalNodes();
     ostringstream oss;

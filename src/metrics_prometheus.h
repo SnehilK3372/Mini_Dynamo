@@ -50,6 +50,11 @@ class PrometheusMetrics : public Metrics {
     uint64_t poolConnectionCreatedCount() const override;
     uint64_t poolConnectionReusedCount() const override;
 
+    void incMembershipSync() override;
+    uint64_t membershipSyncCount() const override;
+    void setRingNodes(uint64_t n) override;
+    uint64_t ringNodesCount() const override;
+
    private:
     // Registry must outlive the Exposer (which holds a weak_ptr to it), so it is
     // declared first and the Exposer is torn down before it.
@@ -69,5 +74,7 @@ class PrometheusMetrics : public Metrics {
     prometheus::Counter *ae_keys_repaired_ = nullptr;
     prometheus::Counter *pool_created_ = nullptr;
     prometheus::Counter *pool_reused_ = nullptr;
+    prometheus::Counter *membership_syncs_ = nullptr;
+    prometheus::Gauge *ring_nodes_ = nullptr;
     prometheus::Gauge *node_up_ = nullptr;
 };

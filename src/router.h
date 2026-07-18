@@ -24,6 +24,10 @@ class Router {
 
     vector<NodeInfo> getAllPhysicalNodes();
 
+    // O(1) count of physical nodes (no membership copy) — feeds the
+    // ring_physical_nodes gauge on every membership change.
+    size_t physicalCount() const;
+
    private:
     int virtual_nodes;
     map<uint64_t, string> ring;

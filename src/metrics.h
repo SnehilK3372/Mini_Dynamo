@@ -50,11 +50,27 @@ class Metrics {
     virtual uint64_t hintStoredCount() const = 0;
     virtual uint64_t hintDeliveredCount() const = 0;
 
-    // Anti-entropy.
+    // Anti-entropy (Merkle, data-level).
     virtual void incAntiEntropySync() = 0;
     virtual void incAntiEntropyKeysRepaired() = 0;
     virtual uint64_t antiEntropySyncCount() const = 0;
     virtual uint64_t antiEntropyKeysRepairedCount() const = 0;
+
+    // Membership anti-entropy (Tier 4.7): full-state push-pull syncs triggered by
+    // a gossip digest mismatch. Deliberately NOT folded into the Merkle counters
+    // above — those track *data* convergence and are documented as 0 until the
+    // cross-node Merkle exchange is implemented; conflating the two would make
+    // that signal unreadable.
+    virtual void incMembershipSync() = 0;
+    virtual uint64_t membershipSyncCount() const = 0;
+
+    // Physical nodes currently in this node's ring — a gauge, not a counter. The
+    // point is cross-node comparison: on a converged cluster every node reports
+    // the same value, so min==max across the fleet; a node whose gauge diverges
+    // has a different ring (the audit's silent-divergence failure mode, otherwise
+    // invisible in Prometheus).
+    virtual void setRingNodes(uint64_t n) = 0;
+    virtual uint64_t ringNodesCount() const = 0;
 
     // Connection pool (Tier 4.3): a fresh connect vs. reuse of an idle connection.
     virtual void incPoolConnectionCreated() = 0;
@@ -100,6 +116,14 @@ class InMemoryMetrics : public Metrics {
         return ae_keys_repaired_.load(std::memory_order_relaxed);
     }
 
+    void incMembershipSync() override { membership_syncs_.fetch_add(1, std::memory_order_relaxed); }
+    uint64_t membershipSyncCount() const override {
+        return membership_syncs_.load(std::memory_order_relaxed);
+    }
+
+    void setRingNodes(uint64_t n) override { ring_nodes_.store(n, std::memory_order_relaxed); }
+    uint64_t ringNodesCount() const override { return ring_nodes_.load(std::memory_order_relaxed); }
+
     void incPoolConnectionCreated() override {
         pool_created_.fetch_add(1, std::memory_order_relaxed);
     }
@@ -126,6 +150,8 @@ class InMemoryMetrics : public Metrics {
     std::atomic<uint64_t> hints_delivered_{0};
     std::atomic<uint64_t> ae_syncs_{0};
     std::atomic<uint64_t> ae_keys_repaired_{0};
+    std::atomic<uint64_t> membership_syncs_{0};
+    std::atomic<uint64_t> ring_nodes_{0};
     std::atomic<uint64_t> pool_created_{0};
     std::atomic<uint64_t> pool_reused_{0};
 };

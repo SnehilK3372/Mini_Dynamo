@@ -102,6 +102,15 @@ class Swim {
     // Get all peers in Alive or Suspect state (for ping target selection).
     std::vector<NodeInfo> alivePeers() const;
 
+    // Peers held Dead — NOT Left (the retired are never probed). Feeds the
+    // resurrection probe: a Dead member is exactly the one normal probing never
+    // talks to again, so without an occasional ping at this set, two sides of a
+    // healed partition that expired each other stay mutually Dead forever — no
+    // probe, no ack, no digest comparison, no sync. (Found by
+    // Cluster.HealedPartitionRecoversWithoutRestart, which deadlocked the first
+    // version of the Tier-4.7 sync design.)
+    std::vector<NodeInfo> deadPeers() const;
+
     // Get all members (any state except Dead or Left).
     //
     // Excluding Left is what keeps a departed node out of the membership list we
@@ -130,6 +139,32 @@ class Swim {
     // to tell "departed" from "never known" (and tests asserting on the tombstone)
     // cannot use a list that hides exactly those two.
     std::optional<MemberState> stateOf(const std::string &node_id) const;
+
+    // A digest of this node's entire membership view (Tier 4.7), carried on every
+    // SWIM_ACK. Two nodes holding the same view — same members, same state
+    // classes, same incarnations — produce the same value; a mismatch is the
+    // trigger for a full-state sync. This is what turns "missed a gossip event"
+    // from a permanent divergence into a transient one: piggyback dissemination
+    // has a finite budget, and before this digest existed the ONLY full exchange
+    // was the one-shot join ack.
+    //
+    // Two properties matter:
+    //  - Order-independent: entries are hashed individually and XOR-combined,
+    //    because each node stores "self" outside the member map — a stream hash
+    //    over each node's natural iteration order would differ between two nodes
+    //    holding identical views.
+    //  - Suspicion-blind: Alive and Suspect collapse to one class. Suspicion is a
+    //    transient, per-observer judgement; including it would make digests
+    //    mismatch chronically during normal operation and trigger useless syncs.
+    uint64_t digest() const;
+
+    // The complete view as events, for a full-state sync: EVERY entry — Alive,
+    // Suspect (sent as Alive), Dead, and **Left** — plus self. Contrast with
+    // allMembers()/the join ack, which hide Dead and Left: a fresh joiner should
+    // not learn of departed nodes, but a sync between two *established* members
+    // is exactly where tombstones and death records must travel — they are the
+    // events whose loss is permanent.
+    std::vector<MemberEvent> fullState() const;
 
     // Check and expire suspects whose suspicion timeout has elapsed.
     // Returns node IDs that were confirmed dead.

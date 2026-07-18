@@ -57,7 +57,6 @@ class Node {
     void handleDelete(const vector<string> &f, const string &rawPayload, int client_fd);
     void handleReplicate(const vector<string> &f, int client_fd);    // coordinator→replica write
     void handleReadReplica(const vector<string> &f, int client_fd);  // coordinator→replica read
-    void handleJoin(const string &payload, int client_fd);
     void handleRingQuery(int client_fd);  // read-only ring snapshot (does not mutate the ring)
     void handleLeave(const vector<string> &f, int client_fd);  // administrative permanent removal
 

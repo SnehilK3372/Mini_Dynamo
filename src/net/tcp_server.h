@@ -4,7 +4,6 @@
 #include <memory>
 #include <string>
 
-#include "../message.h"
 #include "../node.h"
 #include "thread_pool.h"
 
