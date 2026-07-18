@@ -1,4 +1,4 @@
-# Scalability constraints (current, as of Tier 4.5)
+# Scalability constraints (current, as of Tier 4.7)
 
 What actually limits this system today, from a code-level audit — not from the design docs. This
 supersedes the Tier-2 analysis (`docs/decisions/tier-2.md`), which described the pre-gossip world and
@@ -42,8 +42,9 @@ What remains, and must be accepted:
   (permanently-wrong ownership), not good.
 - **Tombstones are in-memory.** A decommission is forgotten only if *every* node restarts at once —
   narrow, since a permanently-dead node never returns and a fresh node learns membership from peers that
-  exclude `Left`. The real exposure is retiring a node that is still running, then restarting the whole
-  cluster. Persisting tombstones needs a metadata column family + a GC story and was deferred.
+  exclude `Left`. Tier 4.7's membership sync narrows it further: any single surviving node re-seeds the
+  tombstone to the whole cluster. The residual exposure is a truly *simultaneous* full restart while the
+  retired node still runs. Persisting tombstones needs a metadata column family + a GC story; deferred.
 - **Do not decommission the live seed.** If the target is still running *and* is the seed, new joiners
   learn a ring containing it (it answers their JOIN) while existing nodes hold the tombstone — a split
   view. Retire the seed only when it is down, or after repointing `SEED_NODES`.
@@ -128,9 +129,52 @@ Compose declares no volume for node data; RocksDB lives in the container's writa
 compose down` (or any `rm`) **wipes node data**. That's *convenient* right now (the 4.4/4.5 breaking
 changes require a fresh ring anyway) but means the cluster is not durable across a recreate.
 
+### 2.13 Reads have no sloppy quorum (writes do) — an availability asymmetry
+Writes route around dead owners with stand-ins + hints; reads just *skip* dead owners
+(`coordinator.cpp`). With N=3, R=W=2 and **two** owners dead, the write succeeds and the read fails
+`quorum_not_met` — data durably written during a multi-failure is unreadable until hint delivery.
+Dynamo reads off the extended preference list for exactly this reason. Found by the post-4.6 audit;
+accepted for now as a deliberate simplification. *Fix:* consult stand-ins on reads too.
+
+### 2.14 `Swim::members_` never garbage-collects Dead/Left entries
+Every node id ever seen stays in the map (and, since 4.7, in every sync payload — ~40 B each). Stable
+ids keep this bounded; cloud-style churn with fresh ids per replacement grows it without limit over
+cluster lifetime. *Fix needs care:* GC'ing a Left tombstone reopens the revival hole it exists to
+close; Dead entries are the safe bulk. Audit finding, deferred.
+
+### 2.15 The gateway's socket pool never evicts departed endpoints
+`ClusterClient.pools` entries are created on demand and removed never; after a node leaves the ring
+its pooled sockets are never polled again — leaked FDs and map growth proportional to lifetime churn.
+Audit finding, deferred (small magnitude until churn is sustained).
+
+### 2.16 Gateway discovery is pinned to the static seed list, forever
+The RING poll (`exchangeAny`) tries only `cluster.nodes` from config. If every listed seed is
+eventually replaced or decommissioned — routine over a long-lived cluster — ring polling fails
+*while the cluster is healthy*, the gateway's cached ring rots, and keyed ops eventually route into
+the void. *Fix:* fall back to polling current ring members. Audit finding, deferred. (Related: e2e
+still has no LEAVE scenario; decommission is covered by the in-process harness only.)
+
 ---
 
 ## 3. Fixed during the audit and the testing tier
+
+### 3.-2 Fixed by Tier 4.7 (`docs/decisions/tier-4.7.md`)
+- **Missed gossip events were missed forever** — the structural finding of the post-4.6 audit.
+  Piggybacked events have a finite dissemination budget and the only full membership exchange was the
+  one-shot join ack; a node partitioned through a `Leave` (or any event) stayed divergent
+  permanently. Now: a membership digest on every ack + push-pull `SWIM_SYNC` on persistent mismatch.
+- **A healed partition stranded a node Dead forever** (worse than the audit stated): peers never
+  probe Dead nodes, `joinViaSeeds` runs only at boot, refutation events were budget-spent — a
+  healthy node stayed invisible until process restart. Fixed by the same sync plus a **resurrection
+  probe** (one ping at a rotating Dead member every 5 ticks) — without which the sync itself
+  deadlocked on *mutual* death, a gap the new partition tests caught in the first design.
+- **The legacy `JOIN` verb** — added any caller straight to the router (no Swim, no incarnation, no
+  `Left` tombstone), sender-less since gossip landed: a one-frame ring-poisoning hole. Deleted.
+- **Node-id charset was documented but unenforced** — an id carrying `|`/`;`/`:` corrupted event
+  parsing cluster-wide. Now validated at startup (fatal), the join handshake (refused), and event
+  application (dropped).
+- **Ring divergence was invisible** — no membership metrics existed. Now `ring_physical_nodes`
+  (fleet-wide `max-min == 0` is the health check) and `membership_syncs_total`.
 
 ### 3.-1 Three more bugs, found by the in-process cluster harness on its first run
 All were live in `main` and all had shipped through a green suite

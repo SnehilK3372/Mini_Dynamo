@@ -23,6 +23,7 @@
 #include "node.h"
 #include "router.h"
 #include "storage/in_memory_storage.h"
+#include "util.h"
 #ifdef HAVE_ROCKSDB
 #include "storage/rocksdb_storage.h"
 #endif
@@ -87,6 +88,17 @@ int main() {
     uint16_t port = stoi(getenv_str("NODE_PORT"));
 
     jlog::init(node_id);
+
+    // Fail fast on an unusable NODE_ID. An invalid id would not just break this
+    // node — it rides the gossip piggyback stream unescaped and corrupts event
+    // parsing on every peer (see isValidNodeId). Refusing to boot is the only
+    // response that cannot poison the cluster.
+    if (!isValidNodeId(node_id)) {
+        jlog::msg("error", "NODE_ID '" + node_id +
+                               "' is invalid: 1-64 chars from [A-Za-z0-9._-] required "
+                               "(it is embedded in '|'/';'/':'-delimited wire formats)");
+        return 1;
+    }
 
     // SEED_NODES: comma-separated list of "host:port" for initial cluster contact.
     // If empty, this node is the first member (self-bootstraps without contacting anyone).
@@ -164,6 +176,18 @@ int main() {
 
     gossip::GossipThread gossip(myInfo, &router, send_fn, gcfg);
     node.setGossipThread(&gossip);
+
+    // Ring-size gauge (Tier 4.7). Callbacks fire in registration order, and the
+    // GossipThread constructor registered the ring add/remove callback first — so
+    // by the time this one runs, the router already reflects the change and
+    // physicalCount() reads the post-mutation value. Registered before
+    // joinViaSeeds so the join-time burst of Alive callbacks is counted too.
+    // Divergence check across the fleet: min==max of this gauge when healthy.
+    metrics_ptr->setRingNodes(router.physicalCount());
+    gossip.swim().onMemberChange([&router, metrics_ptr](const NodeInfo &, gossip::MemberState) {
+        metrics_ptr->setRingNodes(router.physicalCount());
+    });
+    gossip.setOnMembershipSync([metrics_ptr] { metrics_ptr->incMembershipSync(); });
 
     if (seeds.empty()) {
         jlog::msg("info", "started as initial seed (no SEED_NODES)");

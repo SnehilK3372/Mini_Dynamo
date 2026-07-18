@@ -14,7 +14,6 @@ add_library(kv_core STATIC
     src/vector_clock.cpp
     src/versioned_value.cpp
     src/router.cpp
-    src/message.cpp
     src/coordinator.cpp
     src/replica_ops.cpp
     src/storage/in_memory_storage.cpp

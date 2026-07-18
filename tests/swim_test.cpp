@@ -733,3 +733,151 @@ TEST_F(SwimTest, StateOfDistinguishesDepartedFromUnknown) {
         << "the LEAVE verb rejects unknown ids on this distinction — tombstoning a typo "
            "would pre-emptively bar a node that legitimately joins under that id later";
 }
+
+// ---- Membership digest + full state (Tier 4.7) ---------------------------
+//
+// The digest is the trigger for membership anti-entropy: equal views must hash
+// equal (or every ack would trigger a useless sync), and any divergence that
+// matters must hash different (or it stays invisible forever, which is the bug
+// this tier exists to fix).
+
+// Two nodes with the SAME cluster view must produce the same digest, even though
+// each stores "self" outside its member map and inserts members in a different
+// order. This is why entries are hashed individually and XOR-combined: a stream
+// hash over each node's natural iteration order would differ here.
+TEST(SwimDigest, EqualViewsHashEqualAcrossNodes) {
+    Swim a{NodeInfo{"a", "host-a", 5001}, 5};
+    Swim b{NodeInfo{"b", "host-b", 5002}, 5};
+
+    // The same three-member cluster {a, b, c}, learned in different orders.
+    addMember(a, "c");
+    addMember(a, "b");
+    addMember(b, "a");
+    addMember(b, "c");
+
+    EXPECT_EQ(a.digest(), b.digest())
+        << "identical views hashed differently — every ack between these two would "
+           "trigger a pointless sync, forever";
+}
+
+TEST(SwimDigest, SuspicionDoesNotChangeTheDigest) {
+    Swim a{NodeInfo{"a", "host-a", 5001}, 5};
+    addMember(a, "b");
+    uint64_t before = a.digest();
+
+    a.suspect("b");
+
+    EXPECT_EQ(a.digest(), before)
+        << "suspicion is a transient, per-observer judgement — digesting it would make "
+           "mismatches chronic during normal probing and cause sync storms";
+}
+
+TEST(SwimDigest, DivergencesThatMatterChangeTheDigest) {
+    Swim a{NodeInfo{"a", "host-a", 5001}, 5};
+    addMember(a, "b");
+    addMember(a, "c");
+    uint64_t healthy = a.digest();
+
+    // Death is a class flip: must be visible.
+    a.confirmDead("c");
+    uint64_t with_dead = a.digest();
+    EXPECT_NE(with_dead, healthy) << "a death must change the digest";
+
+    // Departure is a different terminal class than death: also visible.
+    a.leave("c");
+    uint64_t with_left = a.digest();
+    EXPECT_NE(with_left, with_dead) << "Left and Dead must not hash alike — one keeps "
+                                       "ring slots and one surrenders them";
+
+    // A refutation (higher incarnation, same Alive class) must be visible too:
+    // missing one strands a node Dead on whoever missed it.
+    MemberEvent bump;
+    bump.type = EventType::Alive;
+    bump.node_id = "b";
+    bump.host = "host-b";
+    bump.port = 5002;
+    bump.incarnation = 7;
+    ASSERT_TRUE(a.applyEvent(bump));
+    EXPECT_NE(a.digest(), with_left) << "an incarnation bump must change the digest";
+}
+
+// Two nodes can legitimately hold the same DEAD member at different incarnations
+// (their suspicions expired at different moments). No sync can reconcile the
+// number — Dead-at-same-or-lower is rejected by design — so if the digest
+// included it, the pair would mismatch and re-sync forever, achieving nothing.
+// Terminal states digest class-only.
+TEST(SwimDigest, DeadIncarnationDifferencesDigestEqual) {
+    Swim a{NodeInfo{"a", "host-a", 5001}, 5};
+    Swim b{NodeInfo{"b", "host-b", 5002}, 5};
+    addMember(a, "b");
+    addMember(b, "a");
+
+    // Both hold x, dead — but a saw it die at incarnation 2, b at 4.
+    addMember(a, "x", 2);
+    addMember(b, "x", 4);
+    a.confirmDead("x");
+    b.confirmDead("x");
+
+    EXPECT_EQ(a.digest(), b.digest())
+        << "unreconcilable Dead-incarnation differences must not mismatch, or these "
+           "two nodes sync fruitlessly on every ack for the rest of the cluster's life";
+}
+
+TEST(SwimDigest, FullStateCarriesDeadLeftAndSelf) {
+    Swim a{NodeInfo{"a", "host-a", 5001}, 5};
+    addMember(a, "b");
+    addMember(a, "c");
+    addMember(a, "d");
+    a.confirmDead("c");
+    a.leave("d");
+
+    auto events = a.fullState();
+    ASSERT_EQ(events.size(), 4u);  // self + b + c + d
+
+    bool self_alive = false, b_alive = false, c_dead = false, d_left = false;
+    for (const auto &ev : events) {
+        if (ev.node_id == "a" && ev.type == EventType::Alive) self_alive = true;
+        if (ev.node_id == "b" && ev.type == EventType::Alive) b_alive = true;
+        if (ev.node_id == "c" && ev.type == EventType::Dead) c_dead = true;
+        if (ev.node_id == "d" && ev.type == EventType::Leave) d_left = true;
+    }
+    EXPECT_TRUE(self_alive) << "self missing: the stranded-partition rescue depends on the "
+                               "peer's full state naming the requester";
+    EXPECT_TRUE(b_alive);
+    EXPECT_TRUE(c_dead) << "Dead records must travel in a sync — their loss is permanent";
+    EXPECT_TRUE(d_left) << "tombstones must travel in a sync — this is how a missed "
+                           "decommission finally lands";
+}
+
+// The join ack's member list still hides Dead and Left (a fresh joiner should not
+// learn of departed nodes); only the sync payload carries them. The two accessors
+// must not drift into aliases of each other.
+TEST(SwimDigest, FullStateAndAllMembersDifferOnPurpose) {
+    Swim a{NodeInfo{"a", "host-a", 5001}, 5};
+    addMember(a, "b");
+    addMember(a, "c");
+    a.leave("c");
+
+    EXPECT_EQ(a.allMembers().size(), 1u) << "the join ack must not advertise departed nodes";
+    EXPECT_EQ(a.fullState().size(), 3u) << "the sync payload must carry them";
+}
+
+// A Dead for a node we never knew is recorded, not dropped (mirror of the
+// unknown-Leave tombstone). Dropping was harmless when events were
+// fire-and-forget; under digest sync it made "I hold X:Dead, you never knew X"
+// an unresolvable mismatch — every comparison differs, every sync replays the
+// same event, nothing ever converges.
+TEST(SwimDigest, UnknownDeadIsRecordedForConvergence) {
+    Swim a{NodeInfo{"a", "host-a", 5001}, 5};
+
+    MemberEvent dead;
+    dead.type = EventType::Dead;
+    dead.node_id = "ghost";
+    dead.incarnation = 3;
+    EXPECT_TRUE(a.applyEvent(dead)) << "the record must be created and the event relayed";
+    EXPECT_EQ(a.stateOf("ghost"), MemberState::Dead);
+    EXPECT_EQ(a.memberCount(), 0u) << "a dead stranger is not a live member";
+
+    // And it stays gated: the same event again is a no-op.
+    EXPECT_FALSE(a.applyEvent(dead));
+}

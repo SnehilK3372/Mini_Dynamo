@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <map>
 #include <string>
 #include <thread>
 
@@ -53,6 +54,12 @@ class GossipThread {
     // Returns false if `node_id` is unknown to this node's membership view.
     bool requestLeave(const std::string &node_id);
 
+    // Observer hook: fired once per completed membership sync exchange this node
+    // takes part in (either as requester or responder). Wired to the
+    // membership_syncs_total metric in main.cpp; the gossip layer itself stays
+    // free of any Metrics dependency.
+    void setOnMembershipSync(std::function<void()> cb) { on_membership_sync_ = std::move(cb); }
+
     // Access the SWIM state (e.g., to register callbacks).
     Swim &swim() { return swim_; }
 
@@ -64,16 +71,41 @@ class GossipThread {
     void run();
     void tick();
     void pingTarget(const NodeInfo &target);
+    // Direct ping only — no indirect probes, no suspicion. For the resurrection
+    // probe: the target is *expected* to be dead, so escalating a non-answer
+    // through K proxies would waste three round trips per probe on every
+    // genuinely dead member.
+    void probeDead(const NodeInfo &target);
+    // Parse an ack: apply its piggybacked events and run the digest comparison.
+    // Returns false if `resp` is empty or not an ack.
+    bool handleAck(const NodeInfo &peer, const std::string &resp);
     std::string buildPing(const std::string &target_id = "");
     std::string buildPingReq(const std::string &target_id, const std::string &via_id);
     std::string buildAck(const std::string &target_id = "");
     void applyIncomingEvents(const std::string &events_field);
+
+    // Membership anti-entropy (Tier 4.7): compare the digest a peer's ack
+    // carried against our own; on a *persistent* mismatch, run a push-pull
+    // full-state exchange with that peer.
+    void maybeSync(const NodeInfo &peer, const std::string &digest_field);
+    void performSync(const NodeInfo &peer);
 
     NodeInfo self_;
     Router *router_;
     SendFn send_fn_;
     GossipConfig config_;
     Swim swim_;
+
+    std::function<void()> on_membership_sync_;
+
+    // Mismatch bookkeeping, confined to the gossip thread (only the tick →
+    // pingTarget → maybeSync path touches it), so it needs no lock.
+    struct MismatchState {
+        int consecutive = 0;
+        uint64_t last_sync_tick = 0;
+    };
+    std::map<std::string, MismatchState> mismatch_;
+    uint64_t tick_count_ = 0;
 
     std::atomic<bool> running_{false};
     std::thread thread_;

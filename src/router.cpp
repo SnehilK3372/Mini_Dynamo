@@ -37,6 +37,11 @@ void Router::removePhysicalNode(const string &node_id) {
     }
 }
 
+size_t Router::physicalCount() const {
+    shared_lock lk(mtx_);
+    return nodes.size();
+}
+
 vector<pair<uint64_t, string>> Router::debugRing() {
     shared_lock lk(mtx_);
     vector<pair<uint64_t, string>> out;

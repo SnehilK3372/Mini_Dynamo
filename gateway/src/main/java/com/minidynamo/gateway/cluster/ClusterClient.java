@@ -43,7 +43,7 @@ public class ClusterClient {
 
     private static final Logger log = LoggerFactory.getLogger(ClusterClient.class);
     private static final String ORIGIN = "gateway";
-    private static final int MAX_FRAME = 64 * 1024 * 1024;  // mirrors framing.h kMaxFrame guard
+    private static final int MAX_FRAME = 16 * 1024 * 1024;  // mirrors framing.h kMaxFrame guard
 
     private final ClusterProperties props;
     private final RingRouter ringRouter;

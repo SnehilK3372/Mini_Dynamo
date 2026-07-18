@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <string>
+#include <thread>
 
 #include "support/in_process_cluster.h"
 
@@ -264,6 +265,126 @@ TEST(Cluster, LeaveDropsPendingHints) {
     EXPECT_GT(n1.hints.dropTarget("node2"), 0u);
     EXPECT_EQ(n1.hints.hintCountFor("node2"), 0u)
         << "hints for a node that can never recover must not linger for the full TTL";
+}
+
+// ---- Membership anti-entropy (Tier 4.7) ----------------------------------
+
+// THE REGRESSION for the audit's structural finding: gossip events have a finite
+// dissemination budget, and before Tier 4.7 the only full membership exchange was
+// the one-shot join ack — so an event that a node missed was missed FOREVER. A
+// node partitioned through a decommission held the departed node in its ring
+// permanently: the operator's LEAVE silently never took there.
+TEST(Cluster, PartitionedNodeMissesLeave_SyncConverges) {
+    InProcessCluster c(4);
+    c.startGossip();
+    ASSERT_TRUE(c.waitForRingEverywhere(4));
+
+    // node4 is partitioned — running, stateful, unreachable. NOT killed: a killed
+    // node would rejoin via the seed and receive a clean view, hiding the bug.
+    c.partition("node4");
+
+    // The decommission target is already DEAD — the canonical use, and the test
+    // depends on it: a node decommissioned while still running re-enqueues its
+    // own Leave and, since a retired node sends no pings, sits on an undrained
+    // copy that the healed node's resurrection probe would collect via plain ack
+    // piggyback — converging without ever exercising the sync path (the first
+    // draft of this test failed its own sync assertion exactly that way). A dead
+    // target holds nothing, so once the live side's copies drain, the tombstone
+    // exists only as *state* — and state travels only by sync.
+    c.kill("node3");
+    ASSERT_TRUE(c.waitForAliveEverywhere("node3", false));
+    ASSERT_TRUE(c.decommission("node3"));
+    ASSERT_TRUE(c.waitForLeftEverywhere("node3"));
+    ASSERT_TRUE(c.waitForRingContains("node3", false));
+
+    // Let the Leave's piggyback budget drain on the connected side (3·log2(N)
+    // sends at a 20ms period) so that when node4 returns there are NO leftover
+    // events that could patch it up — only the digest sync can. The drained queue
+    // is not observable without consuming it, so this is a bounded sleep, not a
+    // poll; the sync-counter assertion below pins the mechanism either way.
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+    NodeCtx &n4 = c.node("node4");
+    ASSERT_TRUE(InProcessCluster::ringHas(n4, "node3"))
+        << "precondition broken: the partitioned node should still hold the departed node";
+
+    c.heal("node4");
+
+    // Digest mismatch → push-pull sync → the tombstone lands, the ring shrinks.
+    EXPECT_TRUE(c.waitFor(
+        [&] {
+            auto g = n4.gossipRef();
+            return g && g->swim().stateOf("node3") == gossip::MemberState::Left &&
+                   !InProcessCluster::ringHas(n4, "node3");
+        },
+        5s))
+        << "the healed node never learned of the decommission — the LEAVE silently "
+           "failed on one node, which is the exact divergence the audit flagged";
+    EXPECT_TRUE(c.waitForRingEverywhere(3));
+
+    // The fix must have come through a sync, and the tombstone must have survived
+    // it in both directions — node4's stale Alive for node3 must not resurrect it.
+    EXPECT_GT(n4.membership_syncs.load(), 0u)
+        << "node4 converged without a sync — leftover piggyback fixed it, so this "
+           "test is not exercising the anti-entropy path";
+    for (const auto &id : {"node1", "node2"}) {
+        EXPECT_EQ(c.node(id).gossipRef()->swim().stateOf("node3"), gossip::MemberState::Left)
+            << id << " lost the tombstone after syncing with the diverged node";
+    }
+}
+
+// The bonus bug the audit understated: a node partitioned past the suspicion
+// timeout is marked Dead by everyone. Pre-4.7, healing the partition could NEVER
+// bring it back — peers don't probe Dead nodes, its own pings don't revive it
+// (only a JOIN handshake or a strictly-newer Alive can, and both the refutation
+// events and joinViaSeeds are long gone). A healthy, running node was stranded
+// invisible until a full process restart. Same class as the Tier-testing rejoin
+// bug, for partitions instead of restarts.
+TEST(Cluster, HealedPartitionRecoversWithoutRestart) {
+    InProcessCluster c(3);
+    c.startGossip();
+    ASSERT_TRUE(c.waitForRingEverywhere(3));
+
+    c.partition("node3");
+    ASSERT_TRUE(c.waitForAliveEverywhere("node3", false))
+        << "peers never declared the partitioned node dead";
+
+    // Outlast the Dead event's dissemination budget, as a real partition would.
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+    c.heal("node3");  // no restart, no re-join — the network just comes back
+
+    // node3 pings a peer, the ack's digest disagrees (it holds itself Alive, the
+    // peer holds it Dead), the sync delivers its own death notice, and the
+    // standard SWIM self-refutation broadcasts Alive at a strictly newer
+    // incarnation. No new revival mechanism — just the existing rule, fed by sync.
+    EXPECT_TRUE(c.waitForAliveEverywhere("node3", true))
+        << "a healed partition stranded a healthy node as Dead forever — it would "
+           "receive no traffic and its hints would expire undelivered";
+    EXPECT_TRUE(c.waitForRingEverywhere(3));
+}
+
+// The gauge that makes all of the above observable: on a converged cluster every
+// node reports the same ring size (min==max across the fleet is the Prometheus
+// divergence check), and a decommission moves it everywhere.
+TEST(Cluster, RingGaugeTracksMembershipEverywhere) {
+    InProcessCluster c(3);
+    c.startGossip();
+    ASSERT_TRUE(c.waitForRingEverywhere(3));
+
+    EXPECT_TRUE(c.waitFor([&] {
+        for (const auto &id : {"node1", "node2", "node3"}) {
+            if (c.node(id).metrics.ringNodesCount() != 3u) return false;
+        }
+        return true;
+    })) << "gauge does not reflect the converged 3-node ring";
+
+    ASSERT_TRUE(c.decommission("node3"));
+    ASSERT_TRUE(c.waitForRingContains("node3", false));
+    EXPECT_TRUE(c.waitFor([&] {
+        return c.node("node1").metrics.ringNodesCount() == 2u &&
+               c.node("node2").metrics.ringNodesCount() == 2u;
+    })) << "gauge did not track the decommission";
 }
 
 // ---- Hinted handoff (Tier 4.2) ------------------------------------------
