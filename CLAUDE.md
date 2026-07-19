@@ -34,10 +34,12 @@ Mini Dynamo — a distributed key-value store in C++17, modeled on Amazon Dynamo
 
 ```bash
 docker compose up --build                        # canonical: 9 containers, API via nginx :8080
-cmake -S . -B build -DBUILD_TESTING=ON && cmake --build build -j4 && ctest --test-dir build
+scripts/dev-test.sh                              # ALL C++ checks (format+build+tests), CI-identical image
 cd gateway && ./mvnw test                        # Java suite
-scripts/e2e.sh                                   # whole-stack e2e, one command
+scripts/e2e.sh                                   # whole-stack e2e incl. decommission + partition drills
 ```
+
+Full command reference (drills, bench, mutation testing, troubleshooting): `docs/runbooks/local-dev.md`.
 
 POSIX sockets — the node binary is Linux/Docker only. `kv_core` + the unit tests build anywhere.
 
