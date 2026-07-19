@@ -76,7 +76,7 @@ Node ids are validated everywhere they enter the system (Tier 4.7): 1–64 chars
 
 ## Testing
 
-The suite covers the classic pyramid, and the whole thing runs in CI on every push and pull request (see the badge at the top).
+The suite covers the classic pyramid, and the whole thing runs in CI on every push to main and every pull request (see the badge at the top). **The complete build/run/test guide — every command, CI-identical containers, operational drills, troubleshooting — is [`docs/runbooks/local-dev.md`](docs/runbooks/local-dev.md)**; the quick version: `scripts/dev-test.sh` (all C++ checks), `cd gateway && ./mvnw test` (Java), `scripts/e2e.sh` (whole stack).
 
 **Unit**
 - **C++ (GoogleTest):** ring/hashing, vector-clock comparison, quorum arithmetic, base64, versioned-value/tombstone round-trips, RocksDB persistence.
@@ -89,7 +89,7 @@ The suite covers the classic pyramid, and the whole thing runs in CI on every pu
   `docker build -t mini-dynamo-node:ci . && cd gateway && NODE_IMAGE=mini-dynamo-node:ci ./mvnw verify`
 
 **End-to-end (whole stack, one command)**
-- `scripts/e2e.sh` brings up the full `docker compose` stack, writes with `W=2`, kills a node and reads with `R=2` to prove **availability under one failure**, then restarts the node and reads to prove **convergence via read repair**.
+- `scripts/e2e.sh` brings up the full `docker compose` stack and proves, in order: **availability under one failure** (write `W=2`, kill a node, read `R=2`), **convergence** (read repair pushes the missed writes on recovery), **permanent decommission** (Tier 4.6 `LEAVE` evicts a dead node, watched via the `ring_physical_nodes` gauge), and **membership anti-entropy** (Tier 4.7: a node partitioned through the decommission converges after healing, with no restart).
   `scripts/e2e.sh`
 
 ## Deployment (AWS)

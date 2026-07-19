@@ -133,6 +133,13 @@ checks can stop that vector, which is why apply-time validation alone would not 
 - The partition test asserts `membership_syncs > 0`, so it cannot silently pass via leftover
   piggyback events instead of the sync path — an assertion that already caught its own first draft
   doing exactly that (see above).
+- **e2e now covers decommission + partition-heal on the real stack** (`scripts/e2e.sh`), closing the
+  audit's "no LEAVE in e2e" note. Extending it exposed a pleasing follow-on: the old e2e assertion
+  "read repair fired" started failing *because hinted handoff now works so well* — on a fast machine
+  hints delivered 6/6 missed writes on the Dead→Alive transition before the reads even ran, leaving
+  read repair correctly idle. Two correct convergence mechanisms race; asserting on one of them was
+  wrong the moment the other came alive. The e2e now asserts convergence mechanism-agnostically
+  (either counter moved **and** every outage-era write reads back correct at R=3).
 
 ## Where this could still break
 

@@ -1,12 +1,15 @@
 # Runbook: Deploy & validate on EC2
 
 End-to-end steps to stand up the full Mini Dynamo stack on a single EC2 instance,
-smoke-test the API, verify the Tier-4 features (gossip membership + hinted
-handoff), run load and chaos tests, and view metrics in Prometheus/Grafana.
+smoke-test the API, verify the Tier-4 features (gossip membership, hinted
+handoff, decommission, membership anti-entropy), run load and chaos tests, and
+view metrics in Prometheus/Grafana.
 
 This is the operational companion to [`deploy/aws/README.md`](../../deploy/aws/README.md)
 (which covers the launch/security-group specifics). Read that first for the
-instance sizing rationale.
+instance sizing rationale. **Local build/test/dev flows live in
+[`local-dev.md`](local-dev.md)** — this file assumes the code is already proven
+and focuses on operating it.
 
 > **Scope:** single-host `docker compose` deploy. Multi-host Docker Swarm (for the
 > scaling benchmark) is `deploy/swarm/` — see [§11](#11-multi-host-swarm-optional).
@@ -234,6 +237,33 @@ watch 'curl -s localhost:9090/api/v1/query?query=minidynamo_ring_physical_nodes 
    (`docs/scalability-constraints.md` §2.0/§2.1).
 4. **Swarm scale-down:** shrinking `kvstore` replicas kills tasks but leaves them Dead-in-ring.
    After scaling down, run `leave.sh` once per removed slot (`kvstore-<N>`), highest slots first.
+
+## 7c. Verify membership anti-entropy live (Tier 4.7)
+
+The property being verified: **a node that misses membership events converges anyway.** Cut a node
+off, change membership while it's deaf, heal it, and watch it catch up with no restart:
+
+```bash
+# 1) partition node2 (compose network is <project>_dhtnet — `docker network ls` to confirm)
+docker network disconnect mini_dynamo_dhtnet node2
+
+# 2) while it's deaf, decommission a (stopped) node3 — node2 misses every event
+docker stop node3
+sleep 8
+scripts/leave.sh localhost:5001 node3        # -> RESPONSE|OK|left
+
+# 3) node1 evicts node3; node2 still believes in a 3-node ring — THE divergence
+curl -s localhost:9101/metrics | grep '^minidynamo_ring_physical_nodes'   # 2
+curl -s localhost:9102/metrics | grep '^minidynamo_ring_physical_nodes'   # 3  <- diverged
+
+# 4) heal; node2 converges via digest sync + resurrection probe (~20-40s)
+docker network connect mini_dynamo_dhtnet node2
+watch 'curl -s localhost:9102/metrics | grep -E "ring_physical_nodes|membership_syncs_total"'
+# ring_physical_nodes -> 2, membership_syncs_total > 0, no restart involved
+```
+
+Before Tier 4.7, step 4 never converged: node2 would serve a 3-node ring forever and the cluster
+would carry the divergence silently. `scripts/e2e.sh` runs this exact drill with assertions.
 
 ## 8. Prometheus (SSH tunnel)
 

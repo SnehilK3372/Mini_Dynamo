@@ -1,11 +1,16 @@
 name: CI
 
-# Every push and pull request runs the full pipeline: lint + build + test for
-# both languages, plus image builds and a docker-compose end-to-end. Jobs run in
-# parallel; e2e waits for the unit/integration jobs so a compile break fails fast
-# and cheap before the heavier compose run.
+# The full pipeline: lint + build + test for both languages, plus image builds
+# and a docker-compose end-to-end. Jobs run in parallel; e2e waits for the
+# unit/integration jobs so a compile break fails fast and cheap before the
+# heavier compose run.
+#
+# push is limited to main: a PR branch used to trigger BOTH events, running every
+# job twice per push (visible as duplicate check rows on PRs #11/#12). PRs get
+# the pull_request run; main gets the push run; nothing is covered twice.
 on:
   push:
+    branches: [main]
   pull_request:
 
 # A newer push to the same branch/PR cancels the in-flight run.
